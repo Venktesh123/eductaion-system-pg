@@ -1,30 +1,42 @@
-const mongoose = require("mongoose");
+const { DataTypes } = require("sequelize");
+const { sequelize } = require("../config/database");
 
-const lectureSchema = new mongoose.Schema(
+const Lecture = sequelize.define(
+  "Lecture",
   {
+    id: {
+      type: DataTypes.UUID,
+      defaultValue: DataTypes.UUIDV4,
+      primaryKey: true,
+    },
     title: {
-      type: String,
+      type: DataTypes.STRING,
+      allowNull: false,
     },
     content: {
-      type: String,
+      type: DataTypes.TEXT,
+      allowNull: true,
     },
     videoUrl: {
-      type: String,
+      type: DataTypes.STRING,
+      allowNull: true,
     },
     videoKey: {
-      type: String,
+      type: DataTypes.STRING,
+      allowNull: true,
     },
-    course: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "Course",
+    courseId: {
+      type: DataTypes.UUID,
+      allowNull: false,
     },
     isReviewed: {
-      type: Boolean,
-      default: false,
+      type: DataTypes.BOOLEAN,
+      defaultValue: false,
     },
     reviewDeadline: {
-      type: Date,
-      default: function () {
+      type: DataTypes.DATE,
+      allowNull: true,
+      defaultValue: () => {
         // Set default review deadline to 7 days from creation
         const deadline = new Date();
         deadline.setDate(deadline.getDate() + 7);
@@ -32,40 +44,21 @@ const lectureSchema = new mongoose.Schema(
       },
     },
   },
-  { timestamps: true }
+  {
+    timestamps: true,
+    hooks: {
+      beforeSave: (lecture) => {
+        // Auto-mark as reviewed if deadline has passed
+        if (
+          !lecture.isReviewed &&
+          lecture.reviewDeadline &&
+          new Date() >= lecture.reviewDeadline
+        ) {
+          lecture.isReviewed = true;
+        }
+      },
+    },
+  }
 );
 
-// Middleware to auto-mark as reviewed if deadline has passed
-lectureSchema.pre("save", function (next) {
-  if (
-    !this.isReviewed &&
-    this.reviewDeadline &&
-    new Date() >= this.reviewDeadline
-  ) {
-    this.isReviewed = true;
-  }
-  next();
-});
-
-// Middleware to auto-mark as reviewed if deadline has passed when querying
-lectureSchema.pre("find", function () {
-  this.setOptions({
-    runValidators: true,
-  });
-});
-
-// Static method to update all lectures past their review deadline
-lectureSchema.statics.updateReviewStatus = async function () {
-  const now = new Date();
-  return this.updateMany(
-    {
-      isReviewed: false,
-      reviewDeadline: { $lte: now },
-    },
-    {
-      $set: { isReviewed: true },
-    }
-  );
-};
-
-module.exports = mongoose.model("Lecture", lectureSchema);
+module.exports = Lecture;

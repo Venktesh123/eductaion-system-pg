@@ -1,69 +1,23 @@
-const Assignment = require("../models/Assignment");
-const Course = require("../models/Course");
-const Teacher = require("../models/Teacher");
-const Student = require("../models/Student");
-const mongoose = require("mongoose");
-const catchAsyncErrors = require("../middleware/catchAsyncErrors");
+const {
+  Assignment,
+  Course,
+  Teacher,
+  Student,
+  AssignmentAttachment,
+  Submission,
+  User,
+  sequelize,
+} = require("../models");
 const { ErrorHandler } = require("../middleware/errorHandler");
-const AWS = require("aws-sdk");
-
-// Configure AWS S3
-const s3 = new AWS.S3({
-  accessKeyId: process.env.AWS_ACCESS_KEY_ID,
-  secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
-  region: process.env.AWS_REGION,
-});
-
-// Upload file to S3
-const uploadFileToS3 = async (file, path) => {
-  console.log("Uploading file to S3");
-  return new Promise((resolve, reject) => {
-    // Make sure we have the file data in the right format for S3
-    const fileContent = file.data;
-    if (!fileContent) {
-      console.log("No file content found");
-      return reject(new Error("No file content found"));
-    }
-
-    // Generate a unique filename
-    const fileName = `${path}/${Date.now()}-${file.name.replace(/\s+/g, "-")}`;
-
-    // Set up the S3 upload parameters without ACL
-    const params = {
-      Bucket: process.env.AWS_S3_BUCKET_NAME,
-      Key: fileName,
-      Body: fileContent,
-      ContentType: file.mimetype,
-    };
-
-    console.log("S3 upload params prepared");
-
-    // Upload to S3
-    s3.upload(params, (err, data) => {
-      if (err) {
-        console.log("S3 upload error:", err);
-        return reject(err);
-      }
-      console.log("File uploaded successfully:", fileName);
-      resolve({
-        url: data.Location,
-        key: data.Key,
-      });
-    });
-  });
-};
+const catchAsyncErrors = require("../middleware/catchAsyncErrors");
+const { uploadFileToS3 } = require("../utils/s3Utils");
 
 // Create new assignment
 exports.createAssignment = catchAsyncErrors(async (req, res, next) => {
   console.log("createAssignment: Started");
-  const session = await mongoose.startSession();
-  let transactionStarted = false;
+  const transaction = await sequelize.transaction();
 
   try {
-    await session.startTransaction();
-    transactionStarted = true;
-    console.log("Transaction started");
-
     const { title, description, dueDate, totalPoints } = req.body;
     const { courseId } = req.params; // Extract courseId from URL
 
@@ -75,23 +29,46 @@ exports.createAssignment = catchAsyncErrors(async (req, res, next) => {
       return next(new ErrorHandler("All fields are required", 400));
     }
 
-    // Check if course exists
-    const course = await Course.findById(courseId).session(session);
+    // Check if course exists and belongs to the teacher
+    const teacher = await Teacher.findOne({
+      where: { userId: req.user.id },
+      transaction,
+    });
+
+    if (!teacher) {
+      await transaction.rollback();
+      return next(new ErrorHandler("Teacher not found", 404));
+    }
+
+    const course = await Course.findOne({
+      where: {
+        id: courseId,
+        teacherId: teacher.id,
+      },
+      transaction,
+    });
+
     if (!course) {
       console.log(`Course not found: ${courseId}`);
-      return next(new ErrorHandler("Course not found", 404));
+      await transaction.rollback();
+      return next(new ErrorHandler("Course not found or unauthorized", 404));
     }
     console.log("Course found");
 
     // Create assignment object
-    const assignment = new Assignment({
-      title,
-      description,
-      course: courseId,
-      dueDate,
-      totalPoints,
-      isActive: true, // Default value
-    });
+    const assignment = await Assignment.create(
+      {
+        title,
+        description,
+        courseId,
+        dueDate,
+        totalPoints,
+        isActive: true, // Default value
+      },
+      { transaction }
+    );
+
+    console.log(`Assignment created with ID: ${assignment.id}`);
 
     // Handle file uploads if any
     if (req.files && req.files.attachments) {
@@ -122,6 +99,7 @@ exports.createAssignment = catchAsyncErrors(async (req, res, next) => {
 
         if (!allowedTypes.includes(file.mimetype)) {
           console.log(`Invalid file type: ${file.mimetype}`);
+          await transaction.rollback();
           return next(
             new ErrorHandler(
               `Invalid file type. Allowed types: PDF, JPEG, PNG, DOC, DOCX, XLS, XLSX`,
@@ -133,6 +111,7 @@ exports.createAssignment = catchAsyncErrors(async (req, res, next) => {
         // Validate file size (5MB)
         if (file.size > 5 * 1024 * 1024) {
           console.log(`File too large: ${file.size} bytes`);
+          await transaction.rollback();
           return next(
             new ErrorHandler(`File too large. Maximum size allowed is 5MB`, 400)
           );
@@ -144,7 +123,6 @@ exports.createAssignment = catchAsyncErrors(async (req, res, next) => {
         console.log("Starting file uploads to S3");
 
         const uploadPromises = attachmentsArray.map((file) =>
-          // Pass the whole file object to uploadFileToS3
           uploadFileToS3(file, "assignment-attachments")
         );
 
@@ -152,101 +130,93 @@ exports.createAssignment = catchAsyncErrors(async (req, res, next) => {
         console.log(`Successfully uploaded ${uploadedFiles.length} files`);
 
         // Add attachments to assignment
-        assignment.attachments = uploadedFiles.map((file) => ({
-          name: file.key.split("/").pop(), // Extract filename from key
-          url: file.url,
-        }));
+        const attachmentPromises = uploadedFiles.map((file) =>
+          AssignmentAttachment.create(
+            {
+              assignmentId: assignment.id,
+              name: file.key.split("/").pop(), // Extract filename from key
+              url: file.url,
+            },
+            { transaction }
+          )
+        );
 
+        await Promise.all(attachmentPromises);
         console.log("Attachments added to assignment");
       } catch (uploadError) {
         console.error("Error uploading files:", uploadError);
+        await transaction.rollback();
         return next(new ErrorHandler("Failed to upload files", 500));
       }
     }
 
-    console.log("Saving assignment");
-    await assignment.save({ session });
-    console.log(`Assignment saved with ID: ${assignment._id}`);
-
-    // Add assignment to course's assignments array
-    course.assignments = course.assignments || [];
-    course.assignments.push(assignment._id);
-    console.log("Updating course with new assignment");
-    await course.save({ session });
-    console.log("Course updated");
-
-    console.log("Committing transaction");
-    await session.commitTransaction();
-    transactionStarted = false;
+    await transaction.commit();
     console.log("Transaction committed");
+
+    // Retrieve the assignment with attachments
+    const createdAssignment = await Assignment.findByPk(assignment.id, {
+      include: [AssignmentAttachment],
+    });
 
     res.status(201).json({
       success: true,
       message: "Assignment created successfully",
-      assignment,
+      assignment: createdAssignment,
     });
   } catch (error) {
     console.log(`Error in createAssignment: ${error.message}`);
 
-    if (transactionStarted) {
-      try {
-        console.log("Aborting transaction");
-        await session.abortTransaction();
-        console.log("Transaction aborted");
-      } catch (abortError) {
-        console.error("Error aborting transaction:", abortError);
-      }
+    if (transaction) {
+      await transaction.rollback();
     }
 
     return next(new ErrorHandler(error.message, 500));
-  } finally {
-    console.log("Ending session");
-    await session.endSession();
-    console.log("Session ended");
   }
 });
 
 // Submit assignment (for students)
 exports.submitAssignment = catchAsyncErrors(async (req, res, next) => {
   console.log("submitAssignment: Started");
-  const session = await mongoose.startSession();
-  let transactionStarted = false;
+  const transaction = await sequelize.transaction();
 
   try {
-    await session.startTransaction();
-    transactionStarted = true;
-    console.log("Transaction started");
+    const { assignmentId } = req.params;
 
     // Verify student permissions
-    const student = await Student.findOne({ user: req.user.id }).populate(
-      "user",
-      "name email"
-    );
+    const student = await Student.findOne({
+      where: { userId: req.user.id },
+      include: [{ model: User, attributes: ["name", "email"] }],
+      transaction,
+    });
 
     if (!student) {
       console.log("Student not found");
+      await transaction.rollback();
       return next(new ErrorHandler("Student not found", 404));
     }
-    console.log("Student found:", student._id);
+    console.log("Student found:", student.id);
 
     // Get the assignment
-    const assignment = await Assignment.findById(req.params.assignmentId);
+    const assignment = await Assignment.findByPk(assignmentId, { transaction });
     if (!assignment) {
       console.log("Assignment not found");
+      await transaction.rollback();
       return next(new ErrorHandler("Assignment not found", 404));
     }
-    console.log("Assignment found:", assignment._id);
+    console.log("Assignment found:", assignment.id);
 
     // Check if the student is enrolled in the course
-    const course = await Course.findById(assignment.course);
-    if (!course) {
-      console.log("Course not found");
-      return next(new ErrorHandler("Course not found", 404));
-    }
+    const studentCourse = await sequelize.models.StudentCourse.findOne({
+      where: {
+        studentId: student.id,
+        courseId: assignment.courseId,
+      },
+      transaction,
+    });
 
-    const isEnrolled = student.courses.some((id) => id.equals(course._id));
-    if (!isEnrolled) {
+    if (!studentCourse) {
       console.log("Student not enrolled in course");
+      await transaction.rollback();
       return next(new ErrorHandler("Not enrolled in this course", 403));
     }
     console.log("Student is enrolled in the course");
@@ -254,6 +224,7 @@ exports.submitAssignment = catchAsyncErrors(async (req, res, next) => {
     // Check if the assignment is active
     if (!assignment.isActive) {
       console.log("Assignment not active");
+      await transaction.rollback();
       return next(
         new ErrorHandler(
           "This assignment is no longer accepting submissions",
@@ -265,6 +236,7 @@ exports.submitAssignment = catchAsyncErrors(async (req, res, next) => {
     // Check if file is provided
     if (!req.files || !req.files.submissionFile) {
       console.log("No submission file provided");
+      await transaction.rollback();
       return next(new ErrorHandler("Please upload your submission file", 400));
     }
 
@@ -288,6 +260,7 @@ exports.submitAssignment = catchAsyncErrors(async (req, res, next) => {
 
     if (!validFileTypes.includes(submissionFile.mimetype)) {
       console.log("Invalid file type:", submissionFile.mimetype);
+      await transaction.rollback();
       return next(
         new ErrorHandler(
           "Invalid file type. Please upload a valid document.",
@@ -298,7 +271,7 @@ exports.submitAssignment = catchAsyncErrors(async (req, res, next) => {
 
     // Check if past due date
     const now = new Date();
-    const isDueDatePassed = now > assignment.dueDate;
+    const isDueDatePassed = now > new Date(assignment.dueDate);
     console.log("Is submission late:", isDueDatePassed);
 
     try {
@@ -306,14 +279,18 @@ exports.submitAssignment = catchAsyncErrors(async (req, res, next) => {
       console.log("Attempting S3 upload");
       const uploadedFile = await uploadFileToS3(
         submissionFile,
-        `assignment-submissions/${assignment._id}`
+        `assignment-submissions/${assignment.id}`
       );
       console.log("S3 upload successful:", uploadedFile.url);
 
       // Check if already submitted
-      const existingSubmission = assignment.submissions.find((sub) =>
-        sub.student.equals(student._id)
-      );
+      const existingSubmission = await Submission.findOne({
+        where: {
+          assignmentId: assignment.id,
+          studentId: student.id,
+        },
+        transaction,
+      });
 
       if (existingSubmission) {
         console.log("Updating existing submission");
@@ -322,25 +299,24 @@ exports.submitAssignment = catchAsyncErrors(async (req, res, next) => {
         existingSubmission.submissionDate = now;
         existingSubmission.status = "submitted";
         existingSubmission.isLate = isDueDatePassed;
+        await existingSubmission.save({ transaction });
       } else {
         console.log("Creating new submission");
         // Create new submission
-        assignment.submissions.push({
-          student: student._id,
-          submissionFile: uploadedFile.url,
-          submissionDate: now,
-          status: "submitted",
-          isLate: isDueDatePassed,
-        });
+        await Submission.create(
+          {
+            assignmentId: assignment.id,
+            studentId: student.id,
+            submissionFile: uploadedFile.url,
+            submissionDate: now,
+            status: "submitted",
+            isLate: isDueDatePassed,
+          },
+          { transaction }
+        );
       }
 
-      console.log("Saving assignment");
-      await assignment.save({ session });
-      console.log("Assignment saved successfully");
-
-      console.log("Committing transaction");
-      await session.commitTransaction();
-      transactionStarted = false;
+      await transaction.commit();
       console.log("Transaction committed");
 
       res.json({
@@ -350,69 +326,67 @@ exports.submitAssignment = catchAsyncErrors(async (req, res, next) => {
       });
     } catch (uploadError) {
       console.log("Error during file upload:", uploadError.message);
+      await transaction.rollback();
       throw new Error(`File upload failed: ${uploadError.message}`);
     }
   } catch (error) {
     console.log("Error in submitAssignment:", error.message);
 
-    if (transactionStarted) {
-      try {
-        console.log("Aborting transaction");
-        await session.abortTransaction();
-        console.log("Transaction aborted");
-      } catch (abortError) {
-        console.error("Error aborting transaction:", abortError);
-      }
+    if (transaction) {
+      await transaction.rollback();
     }
 
     return next(new ErrorHandler(error.message, 500));
-  } finally {
-    console.log("Ending session");
-    await session.endSession();
-    console.log("Session ended");
   }
 });
 
 // Grade a submission (for teachers)
 exports.gradeSubmission = catchAsyncErrors(async (req, res, next) => {
   console.log("gradeSubmission: Started");
-  const session = await mongoose.startSession();
-  let transactionStarted = false;
+  const transaction = await sequelize.transaction();
 
   try {
-    await session.startTransaction();
-    transactionStarted = true;
-    console.log("Transaction started");
+    const { assignmentId, submissionId } = req.params;
 
     // Verify teacher permissions
-    const teacher = await Teacher.findOne({ user: req.user.id });
+    const teacher = await Teacher.findOne({
+      where: { userId: req.user.id },
+      transaction,
+    });
+
     if (!teacher) {
       console.log("Teacher not found");
+      await transaction.rollback();
       return next(new ErrorHandler("Teacher not found", 404));
     }
-    console.log("Teacher found:", teacher._id);
+    console.log("Teacher found:", teacher.id);
 
     // Get the assignment
-    const assignment = await Assignment.findById(req.params.assignmentId);
+    const assignment = await Assignment.findByPk(assignmentId, { transaction });
     if (!assignment) {
       console.log("Assignment not found");
+      await transaction.rollback();
       return next(new ErrorHandler("Assignment not found", 404));
     }
-    console.log("Assignment found:", assignment._id);
+    console.log("Assignment found:", assignment.id);
 
     // Check if the teacher owns the course
     const course = await Course.findOne({
-      _id: assignment.course,
-      teacher: teacher._id,
+      where: {
+        id: assignment.courseId,
+        teacherId: teacher.id,
+      },
+      transaction,
     });
 
     if (!course) {
       console.log("Teacher not authorized for this course");
+      await transaction.rollback();
       return next(
         new ErrorHandler("Unauthorized to grade this assignment", 403)
       );
     }
-    console.log("Teacher authorized for course:", course._id);
+    console.log("Teacher authorized for course:", course.id);
 
     const { grade, feedback } = req.body;
     console.log(
@@ -425,6 +399,7 @@ exports.gradeSubmission = catchAsyncErrors(async (req, res, next) => {
       console.log(
         `Invalid grade: ${grade}, total points: ${assignment.totalPoints}`
       );
+      await transaction.rollback();
       return next(
         new ErrorHandler(
           `Grade must be between 0 and ${assignment.totalPoints}`,
@@ -434,52 +409,44 @@ exports.gradeSubmission = catchAsyncErrors(async (req, res, next) => {
     }
 
     // Find the submission
-    const submissionIndex = assignment.submissions.findIndex(
-      (sub) => sub._id.toString() === req.params.submissionId
-    );
+    const submission = await Submission.findOne({
+      where: {
+        id: submissionId,
+        assignmentId: assignment.id,
+      },
+      transaction,
+    });
 
-    if (submissionIndex === -1) {
-      console.log(`Submission not found: ${req.params.submissionId}`);
+    if (!submission) {
+      console.log(`Submission not found: ${submissionId}`);
+      await transaction.rollback();
       return next(new ErrorHandler("Submission not found", 404));
     }
-    console.log("Submission found at index:", submissionIndex);
+    console.log("Submission found");
 
     // Update grade and feedback
-    assignment.submissions[submissionIndex].grade = grade;
-    assignment.submissions[submissionIndex].feedback = feedback;
-    assignment.submissions[submissionIndex].status = "graded";
+    submission.grade = grade;
+    submission.feedback = feedback;
+    submission.status = "graded";
+    await submission.save({ transaction });
     console.log("Submission updated with grade and feedback");
 
-    console.log("Saving assignment");
-    await assignment.save({ session });
-    console.log("Assignment saved with graded submission");
-
-    console.log("Committing transaction");
-    await session.commitTransaction();
-    transactionStarted = false;
+    await transaction.commit();
     console.log("Transaction committed");
 
     res.json({
       success: true,
       message: "Submission graded successfully",
+      submission,
     });
   } catch (error) {
     console.log("Error in gradeSubmission:", error.message);
 
-    if (transactionStarted) {
-      try {
-        console.log("Aborting transaction");
-        await session.abortTransaction();
-        console.log("Transaction aborted");
-      } catch (abortError) {
-        console.error("Error aborting transaction:", abortError);
-      }
+    if (transaction) {
+      await transaction.rollback();
     }
+
     return next(new ErrorHandler(error.message, 500));
-  } finally {
-    console.log("Ending session");
-    await session.endSession();
-    console.log("Session ended");
   }
 });
 
@@ -492,7 +459,7 @@ exports.getCourseAssignments = catchAsyncErrors(async (req, res, next) => {
     console.log(`Fetching assignments for course: ${courseId}`);
 
     // Find the course
-    const course = await Course.findById(courseId);
+    const course = await Course.findByPk(courseId);
     if (!course) {
       console.log("Course not found");
       return next(new ErrorHandler("Course not found", 404));
@@ -502,16 +469,24 @@ exports.getCourseAssignments = catchAsyncErrors(async (req, res, next) => {
     // Verify that the user has access to this course
     if (req.user.role === "teacher") {
       console.log("Verifying teacher access");
-      const teacher = await Teacher.findOne({ user: req.user.id });
-      if (!teacher || !course.teacher.equals(teacher._id)) {
+      const teacher = await Teacher.findOne({ where: { userId: req.user.id } });
+      if (!teacher || course.teacherId !== teacher.id) {
         console.log("Teacher not authorized for this course");
         return next(new ErrorHandler("Unauthorized access", 403));
       }
       console.log("Teacher authorized");
     } else if (req.user.role === "student") {
       console.log("Verifying student access");
-      const student = await Student.findOne({ user: req.user.id });
-      if (!student || !student.courses.some((id) => id.equals(course._id))) {
+      const student = await Student.findOne({ where: { userId: req.user.id } });
+
+      const studentCourse = await sequelize.models.StudentCourse.findOne({
+        where: {
+          studentId: student.id,
+          courseId: course.id,
+        },
+      });
+
+      if (!student || !studentCourse) {
         console.log("Student not enrolled in this course");
         return next(new ErrorHandler("Unauthorized access", 403));
       }
@@ -520,22 +495,40 @@ exports.getCourseAssignments = catchAsyncErrors(async (req, res, next) => {
 
     // Find all assignments for this course
     console.log("Fetching assignments");
-    const assignments = await Assignment.find({ course: courseId }).sort({
-      dueDate: 1,
+    const assignments = await Assignment.findAll({
+      where: { courseId },
+      include: [AssignmentAttachment],
+      order: [["dueDate", "ASC"]],
     });
+
     console.log(`Found ${assignments.length} assignments`);
 
-    // Filter submissions for students (they should only see their own)
+    // For students, include their submissions
     if (req.user.role === "student") {
-      console.log("Filtering submissions for student");
-      const student = await Student.findOne({ user: req.user.id });
+      console.log("Fetching student submissions");
+      const student = await Student.findOne({ where: { userId: req.user.id } });
 
-      assignments.forEach((assignment) => {
-        assignment.submissions = assignment.submissions.filter((submission) =>
-          submission.student.equals(student._id)
-        );
+      // Get submissions for this student for these assignments
+      const assignmentIds = assignments.map((a) => a.id);
+      const submissions = await Submission.findAll({
+        where: {
+          assignmentId: assignmentIds,
+          studentId: student.id,
+        },
       });
-      console.log("Submissions filtered");
+
+      // Create a mapping of assignmentId to submission
+      const submissionMap = {};
+      submissions.forEach((sub) => {
+        submissionMap[sub.assignmentId] = sub;
+      });
+
+      // Add submission to each assignment
+      assignments.forEach((assignment) => {
+        assignment.dataValues.submission = submissionMap[assignment.id] || null;
+      });
+
+      console.log("Added student submissions to assignments");
     }
 
     res.status(200).json({
@@ -555,11 +548,16 @@ exports.getAssignmentById = catchAsyncErrors(async (req, res, next) => {
     const { assignmentId } = req.params;
     console.log(`Fetching assignment: ${assignmentId}`);
 
-    // Find the assignment with course information
-    const assignment = await Assignment.findById(assignmentId).populate(
-      "course",
-      "title"
-    );
+    // Find the assignment with associated info
+    const assignment = await Assignment.findByPk(assignmentId, {
+      include: [
+        AssignmentAttachment,
+        {
+          model: Course,
+          attributes: ["id", "title"],
+        },
+      ],
+    });
 
     if (!assignment) {
       console.log("Assignment not found");
@@ -570,41 +568,57 @@ exports.getAssignmentById = catchAsyncErrors(async (req, res, next) => {
     // Verify that the user has access to this assignment's course
     if (req.user.role === "teacher") {
       console.log("Verifying teacher access");
-      const teacher = await Teacher.findOne({ user: req.user.id });
-      const course = await Course.findById(assignment.course);
+      const teacher = await Teacher.findOne({ where: { userId: req.user.id } });
 
-      if (!teacher || !course.teacher.equals(teacher._id)) {
+      if (!teacher || assignment.Course.teacherId !== teacher.id) {
         console.log("Teacher not authorized for this course");
         return next(new ErrorHandler("Unauthorized access", 403));
       }
       console.log("Teacher authorized");
+
+      // For teachers, include all submissions
+      const submissions = await Submission.findAll({
+        where: { assignmentId: assignment.id },
+        include: [
+          {
+            model: Student,
+            include: [
+              {
+                model: User,
+                attributes: ["name", "email"],
+              },
+            ],
+          },
+        ],
+      });
+
+      assignment.dataValues.submissions = submissions;
     } else if (req.user.role === "student") {
       console.log("Verifying student access");
-      const student = await Student.findOne({ user: req.user.id });
+      const student = await Student.findOne({ where: { userId: req.user.id } });
 
-      // Check if student is enrolled in the course
-      if (
-        !student ||
-        !student.courses.some((id) => id.equals(assignment.course._id))
-      ) {
+      const studentCourse = await sequelize.models.StudentCourse.findOne({
+        where: {
+          studentId: student.id,
+          courseId: assignment.courseId,
+        },
+      });
+
+      if (!student || !studentCourse) {
         console.log("Student not enrolled in this course");
         return next(new ErrorHandler("Unauthorized access", 403));
       }
       console.log("Student authorized");
 
-      // Replace the student ID with req.user.id in each submission for this student
-      assignment.submissions = assignment.submissions
-        .filter((submission) => submission.student.equals(student._id))
-        .map((submission) => {
-          // Create a new object to avoid modifying the original
-          const modifiedSubmission = {
-            ...submission.toObject(), // Convert to plain object if it's a Mongoose document
-            student: req.user.id, // Replace student field with req.user.id
-          };
-          return modifiedSubmission;
-        });
+      // For students, include only their submission
+      const submission = await Submission.findOne({
+        where: {
+          assignmentId: assignment.id,
+          studentId: student.id,
+        },
+      });
 
-      console.log("Submissions modified for student");
+      assignment.dataValues.submission = submission || null;
     }
 
     res.status(200).json({
@@ -616,58 +630,69 @@ exports.getAssignmentById = catchAsyncErrors(async (req, res, next) => {
     return next(new ErrorHandler(error.message, 500));
   }
 });
+
+// Update an assignment
 exports.updateAssignment = catchAsyncErrors(async (req, res, next) => {
   console.log("updateAssignment: Started");
-  const session = await mongoose.startSession();
-  let transactionStarted = false;
+  const transaction = await sequelize.transaction();
 
   try {
-    await session.startTransaction();
-    transactionStarted = true;
-    console.log("Transaction started");
-
     const { assignmentId } = req.params;
     console.log(`Updating assignment: ${assignmentId}`);
 
     // Verify teacher permissions
-    const teacher = await Teacher.findOne({ user: req.user.id });
+    const teacher = await Teacher.findOne({
+      where: { userId: req.user.id },
+      transaction,
+    });
+
     if (!teacher) {
       console.log("Teacher not found");
+      await transaction.rollback();
       return next(new ErrorHandler("Teacher not found", 404));
     }
-    console.log("Teacher found:", teacher._id);
+    console.log("Teacher found:", teacher.id);
 
     // Get the assignment
-    const assignment = await Assignment.findById(assignmentId);
+    const assignment = await Assignment.findByPk(assignmentId, { transaction });
     if (!assignment) {
       console.log("Assignment not found");
+      await transaction.rollback();
       return next(new ErrorHandler("Assignment not found", 404));
     }
-    console.log("Assignment found:", assignment._id);
+    console.log("Assignment found:", assignment.id);
 
     // Check if the teacher owns the course
     const course = await Course.findOne({
-      _id: assignment.course,
-      teacher: teacher._id,
+      where: {
+        id: assignment.courseId,
+        teacherId: teacher.id,
+      },
+      transaction,
     });
 
     if (!course) {
       console.log("Teacher not authorized for this course");
+      await transaction.rollback();
       return next(
         new ErrorHandler("Unauthorized to update this assignment", 403)
       );
     }
-    console.log("Teacher authorized for course:", course._id);
+    console.log("Teacher authorized for course:", course.id);
 
     // Extract update fields
     const { title, description, dueDate, totalPoints, isActive } = req.body;
 
     // Update assignment fields if provided
-    if (title) assignment.title = title;
-    if (description) assignment.description = description;
-    if (dueDate) assignment.dueDate = dueDate;
-    if (totalPoints) assignment.totalPoints = totalPoints;
-    if (isActive !== undefined) assignment.isActive = isActive;
+    const updateData = {};
+    if (title) updateData.title = title;
+    if (description) updateData.description = description;
+    if (dueDate) updateData.dueDate = dueDate;
+    if (totalPoints) updateData.totalPoints = totalPoints;
+    if (isActive !== undefined) updateData.isActive = isActive;
+
+    // Update the assignment
+    await assignment.update(updateData, { transaction });
 
     // Handle file uploads if any
     if (req.files && req.files.attachments) {
@@ -698,6 +723,7 @@ exports.updateAssignment = catchAsyncErrors(async (req, res, next) => {
 
         if (!allowedTypes.includes(file.mimetype)) {
           console.log(`Invalid file type: ${file.mimetype}`);
+          await transaction.rollback();
           return next(
             new ErrorHandler(
               `Invalid file type. Allowed types: PDF, JPEG, PNG, DOC, DOCX, XLS, XLSX`,
@@ -709,6 +735,7 @@ exports.updateAssignment = catchAsyncErrors(async (req, res, next) => {
         // Validate file size (5MB)
         if (file.size > 5 * 1024 * 1024) {
           console.log(`File too large: ${file.size} bytes`);
+          await transaction.rollback();
           return next(
             new ErrorHandler(`File too large. Maximum size allowed is 5MB`, 400)
           );
@@ -730,27 +757,31 @@ exports.updateAssignment = catchAsyncErrors(async (req, res, next) => {
         const { replaceAttachments } = req.body;
 
         if (replaceAttachments === "true") {
-          // Replace all existing attachments
-          assignment.attachments = uploadedFiles.map((file) => ({
-            name: file.key.split("/").pop(), // Extract filename from key
-            url: file.url,
-          }));
-          console.log("Replaced all attachments");
-        } else {
-          // Append new attachments to existing ones
-          const newAttachments = uploadedFiles.map((file) => ({
-            name: file.key.split("/").pop(),
-            url: file.url,
-          }));
-
-          assignment.attachments = [
-            ...assignment.attachments,
-            ...newAttachments,
-          ];
-          console.log("Added new attachments to existing ones");
+          // Delete existing attachments
+          await AssignmentAttachment.destroy({
+            where: { assignmentId: assignment.id },
+            transaction,
+          });
+          console.log("Deleted existing attachments");
         }
+
+        // Add new attachments
+        const attachmentPromises = uploadedFiles.map((file) =>
+          AssignmentAttachment.create(
+            {
+              assignmentId: assignment.id,
+              name: file.key.split("/").pop(), // Extract filename from key
+              url: file.url,
+            },
+            { transaction }
+          )
+        );
+
+        await Promise.all(attachmentPromises);
+        console.log("Added new attachments");
       } catch (uploadError) {
         console.error("Error uploading files:", uploadError);
+        await transaction.rollback();
         return next(new ErrorHandler("Failed to upload files", 500));
       }
     }
@@ -763,114 +794,99 @@ exports.updateAssignment = catchAsyncErrors(async (req, res, next) => {
 
       console.log(`Removing ${attachmentsToRemove.length} attachments`);
 
-      assignment.attachments = assignment.attachments.filter(
-        (attachment) => !attachmentsToRemove.includes(attachment._id.toString())
-      );
+      await AssignmentAttachment.destroy({
+        where: {
+          id: attachmentsToRemove,
+          assignmentId: assignment.id,
+        },
+        transaction,
+      });
 
       console.log("Attachments removed");
     }
 
-    console.log("Saving updated assignment");
-    await assignment.save({ session });
-    console.log("Assignment updated successfully");
-
-    console.log("Committing transaction");
-    await session.commitTransaction();
-    transactionStarted = false;
+    await transaction.commit();
     console.log("Transaction committed");
+
+    // Fetch the updated assignment with attachments
+    const updatedAssignment = await Assignment.findByPk(assignment.id, {
+      include: [AssignmentAttachment],
+    });
 
     res.status(200).json({
       success: true,
       message: "Assignment updated successfully",
-      assignment,
+      assignment: updatedAssignment,
     });
   } catch (error) {
     console.log(`Error in updateAssignment: ${error.message}`);
 
-    if (transactionStarted) {
-      try {
-        console.log("Aborting transaction");
-        await session.abortTransaction();
-        console.log("Transaction aborted");
-      } catch (abortError) {
-        console.error("Error aborting transaction:", abortError);
-      }
+    if (transaction) {
+      await transaction.rollback();
     }
 
     return next(new ErrorHandler(error.message, 500));
-  } finally {
-    console.log("Ending session");
-    await session.endSession();
-    console.log("Session ended");
   }
 });
 
 // Delete assignment
 exports.deleteAssignment = catchAsyncErrors(async (req, res, next) => {
   console.log("deleteAssignment: Started");
-  const session = await mongoose.startSession();
-  let transactionStarted = false;
+  const transaction = await sequelize.transaction();
 
   try {
-    await session.startTransaction();
-    transactionStarted = true;
-    console.log("Transaction started");
-
     const { assignmentId } = req.params;
     console.log(`Deleting assignment: ${assignmentId}`);
 
     // Verify teacher permissions
-    const teacher = await Teacher.findOne({ user: req.user.id });
+    const teacher = await Teacher.findOne({
+      where: { userId: req.user.id },
+      transaction,
+    });
+
     if (!teacher) {
       console.log("Teacher not found");
+      await transaction.rollback();
       return next(new ErrorHandler("Teacher not found", 404));
     }
-    console.log("Teacher found:", teacher._id);
+    console.log("Teacher found:", teacher.id);
 
     // Get the assignment
-    const assignment = await Assignment.findById(assignmentId);
+    const assignment = await Assignment.findByPk(assignmentId, {
+      include: [AssignmentAttachment],
+      transaction,
+    });
+
     if (!assignment) {
       console.log("Assignment not found");
+      await transaction.rollback();
       return next(new ErrorHandler("Assignment not found", 404));
     }
-    console.log("Assignment found:", assignment._id);
+    console.log("Assignment found:", assignment.id);
 
-    // Get the course and verify ownership
+    // Check if the teacher owns the course
     const course = await Course.findOne({
-      _id: assignment.course,
-      teacher: teacher._id,
+      where: {
+        id: assignment.courseId,
+        teacherId: teacher.id,
+      },
+      transaction,
     });
 
     if (!course) {
       console.log("Teacher not authorized for this course");
+      await transaction.rollback();
       return next(
         new ErrorHandler("Unauthorized to delete this assignment", 403)
       );
     }
-    console.log("Teacher authorized for course:", course._id);
+    console.log("Teacher authorized for course:", course.id);
 
-    // Remove assignment from course
-    console.log("Removing assignment from course");
-    course.assignments = course.assignments.filter(
-      (id) => !id.equals(assignment._id)
-    );
-    await course.save({ session });
-    console.log("Course updated");
-
-    // Delete S3 files if needed (optional in this implementation)
-    // This would require listing and deleting objects with the prefix:
-    // `assignment-attachments/${assignment._id}`
-    // and `assignment-submissions/${assignment._id}`
-    // For brevity, this is left as a comment
-
-    // Delete the assignment
-    console.log("Deleting assignment document");
-    await Assignment.findByIdAndDelete(assignmentId).session(session);
+    // Delete the assignment (cascades to attachments and submissions due to FK constraints)
+    await assignment.destroy({ transaction });
     console.log("Assignment deleted");
 
-    console.log("Committing transaction");
-    await session.commitTransaction();
-    transactionStarted = false;
+    await transaction.commit();
     console.log("Transaction committed");
 
     res.status(200).json({
@@ -880,20 +896,10 @@ exports.deleteAssignment = catchAsyncErrors(async (req, res, next) => {
   } catch (error) {
     console.log(`Error in deleteAssignment: ${error.message}`);
 
-    if (transactionStarted) {
-      try {
-        console.log("Aborting transaction");
-        await session.abortTransaction();
-        console.log("Transaction aborted");
-      } catch (abortError) {
-        console.error("Error aborting transaction:", abortError);
-      }
+    if (transaction) {
+      await transaction.rollback();
     }
 
     return next(new ErrorHandler(error.message, 500));
-  } finally {
-    console.log("Ending session");
-    await session.endSession();
-    console.log("Session ended");
   }
 });

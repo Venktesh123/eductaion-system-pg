@@ -1,66 +1,34 @@
-const mongoose = require("mongoose");
+const { DataTypes } = require("sequelize");
+const { sequelize } = require("../config/database");
 
-const courseSchema = new mongoose.Schema(
+const Course = sequelize.define(
+  "Course",
   {
+    id: {
+      type: DataTypes.UUID,
+      defaultValue: DataTypes.UUIDV4,
+      primaryKey: true,
+    },
     title: {
-      type: String,
-      required: true,
+      type: DataTypes.STRING,
+      allowNull: false,
     },
     aboutCourse: {
-      type: String,
-      required: true,
+      type: DataTypes.TEXT,
+      allowNull: false,
     },
-    semester: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "Semester",
-      required: true,
+    semesterId: {
+      type: DataTypes.UUID,
+      allowNull: false,
     },
-    teacher: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "Teacher",
-      required: true,
+    teacherId: {
+      type: DataTypes.UUID,
+      allowNull: false,
     },
-    lectures: [
-      {
-        title: String,
-        recordingUrl: String,
-        date: Date,
-        duration: Number,
-      },
-    ],
-    // References to other models
-    outcomes: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "CourseOutcome",
-    },
-    schedule: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "CourseSchedule",
-    },
-    syllabus: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "CourseSyllabus",
-    },
-    weeklyPlan: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "WeeklyPlan",
-    },
-    creditPoints: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "CreditPoints",
-    },
-    attendance: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "CourseAttendance",
-    },
-    assignments: [
-      {
-        type: mongoose.Schema.Types.ObjectId,
-        ref: "Assignment",
-      },
-    ],
   },
-  { timestamps: true }
+  {
+    timestamps: true,
+  }
 );
 
-module.exports = mongoose.model("Course", courseSchema);
+module.exports = Course;

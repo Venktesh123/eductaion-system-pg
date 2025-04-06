@@ -1,133 +1,129 @@
-const Event = require("../models/Event");
+const { Event } = require("../models");
+const { ErrorHandler } = require("../middleware/errorHandler");
+const catchAsyncErrors = require("../middleware/catchAsyncErrors");
 
-const getAllEvents = async (req, res) => {
+// Get all events
+const getAllEvents = catchAsyncErrors(async (req, res, next) => {
   try {
-    const events = await Event.find().sort({ date: 1 });
+    const events = await Event.findAll({
+      order: [["date", "ASC"]],
+    });
+
     res.status(200).json({
       success: true,
       count: events.length,
       data: events,
     });
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      error: "Server Error",
-    });
+    return next(new ErrorHandler("Failed to fetch events", 500));
   }
-};
+});
 
-// controllers/getEventById.js
-
-const getEventById = async (req, res) => {
+// Delete event
+const deleteEvent = catchAsyncErrors(async (req, res, next) => {
   try {
-    const event = await Event.findById(req.params.id);
+    const event = await Event.findByPk(req.params.id);
+
     if (!event) {
-      return res.status(404).json({
-        success: false,
-        error: "Event not found",
-      });
+      return next(new ErrorHandler("Event not found", 404));
     }
+
+    await event.destroy();
+
+    res.status(200).json({
+      success: true,
+      data: {},
+      message: "Event deleted successfully",
+    });
+  } catch (error) {
+    return next(new ErrorHandler("Failed to delete event", 500));
+  }
+});
+
+// Get event by ID
+const getEventById = catchAsyncErrors(async (req, res, next) => {
+  try {
+    const event = await Event.findByPk(req.params.id);
+
+    if (!event) {
+      return next(new ErrorHandler("Event not found", 404));
+    }
+
     res.status(200).json({
       success: true,
       data: event,
     });
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      error: "Server Error",
-    });
+    return next(new ErrorHandler("Failed to fetch event", 500));
   }
-};
+});
 
-// controllers/createEvent.js
-
-const createEvent = async (req, res) => {
+// Create event (admin only)
+const createEvent = catchAsyncErrors(async (req, res, next) => {
   try {
+    // Validate required fields
+    const { name, date, time, image, location, link } = req.body;
+    if (!name || !date || !time || !image || !location || !link) {
+      return next(new ErrorHandler("Please provide all required fields", 400));
+    }
+
+    // Validate link format
+    const urlPattern = /^https?:\/\/.+/;
+    if (!urlPattern.test(link)) {
+      return next(new ErrorHandler("Link must be a valid URL", 400));
+    }
+
     const event = await Event.create(req.body);
+
     res.status(201).json({
       success: true,
       data: event,
     });
   } catch (error) {
-    if (error.name === "ValidationError") {
-      const messages = Object.values(error.errors).map((err) => err.message);
-      return res.status(400).json({
-        success: false,
-        error: messages,
-      });
+    if (error.name === "SequelizeValidationError") {
+      const messages = error.errors.map((err) => err.message);
+      return next(new ErrorHandler(messages.join(", "), 400));
     }
-    res.status(500).json({
-      success: false,
-      error: "Server Error",
-    });
+    return next(new ErrorHandler("Failed to create event", 500));
   }
-};
+});
 
-// controllers/updateEvent.js
-
-const updateEvent = async (req, res) => {
+// Update event
+const updateEvent = catchAsyncErrors(async (req, res, next) => {
   try {
-    const event = await Event.findByIdAndUpdate(req.params.id, req.body, {
-      new: true,
-      runValidators: true,
-    });
+    const event = await Event.findByPk(req.params.id);
 
     if (!event) {
-      return res.status(404).json({
-        success: false,
-        error: "Event not found",
-      });
+      return next(new ErrorHandler("Event not found", 404));
     }
+
+    // Check if link is being updated and validate if so
+    if (req.body.link) {
+      const urlPattern = /^https?:\/\/.+/;
+      if (!urlPattern.test(req.body.link)) {
+        return next(new ErrorHandler("Link must be a valid URL", 400));
+      }
+    }
+
+    await event.update(req.body);
 
     res.status(200).json({
       success: true,
       data: event,
     });
   } catch (error) {
-    if (error.name === "ValidationError") {
-      const messages = Object.values(error.errors).map((err) => err.message);
-      return res.status(400).json({
-        success: false,
-        error: messages,
-      });
+    if (error.name === "SequelizeValidationError") {
+      const messages = error.errors.map((err) => err.message);
+      return next(new ErrorHandler(messages.join(", "), 400));
     }
-    res.status(500).json({
-      success: false,
-      error: "Server Error",
-    });
+    return next(new ErrorHandler("Failed to update event", 500));
   }
-};
+});
 
-// controllers/deleteEvent.js
-
-const deleteEvent = async (req, res) => {
-  try {
-    const event = await Event.findById(req.params.id);
-
-    if (!event) {
-      return res.status(404).json({
-        success: false,
-        error: "Event not found",
-      });
-    }
-
-    await event.deleteOne();
-
-    res.status(200).json({
-      success: true,
-      data: {},
-    });
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      error: "Server Error",
-    });
-  }
-};
 module.exports = {
-  deleteEvent,
-  updateEvent,
-  createEvent,
-  getEventById,
   getAllEvents,
+  getEventById,
+  createEvent,
+  updateEvent,
+  deleteEvent,
 };

@@ -1,26 +1,26 @@
 const { DataTypes } = require("sequelize");
 const { sequelize } = require("../config/database");
 
-const Teacher = sequelize.define(
-  "Teacher",
+// Junction table for many-to-many relationship between students and courses
+const StudentCourse = sequelize.define(
+  "StudentCourse",
   {
     id: {
       type: DataTypes.UUID,
       defaultValue: DataTypes.UUIDV4,
       primaryKey: true,
     },
-    email: {
-      type: DataTypes.STRING,
-      allowNull: false,
-      unique: true,
-      validate: {
-        isEmail: true,
-      },
-    },
-    userId: {
+    studentId: {
       type: DataTypes.UUID,
       allowNull: false,
-      unique: true,
+    },
+    courseId: {
+      type: DataTypes.UUID,
+      allowNull: false,
+    },
+    enrollmentDate: {
+      type: DataTypes.DATE,
+      defaultValue: DataTypes.NOW,
     },
   },
   {
@@ -28,4 +28,4 @@ const Teacher = sequelize.define(
   }
 );
 
-module.exports = Teacher;
+module.exports = StudentCourse;

@@ -1,11 +1,9 @@
-const User = require("../models/User");
-const Teacher = require("../models/Teacher");
-const Student = require("../models/Student");
+const { User, Teacher, Student, sequelize } = require("../models");
 const { ErrorHandler } = require("../middleware/errorHandler");
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
 
-const uploadUsers = async (req, res) => {
-  const session = await User.startSession();
+const uploadUsers = catchAsyncErrors(async (req, res, next) => {
+  const transaction = await sequelize.transaction();
   console.log("Processing user upload from in-memory data");
 
   try {
@@ -24,106 +22,122 @@ const uploadUsers = async (req, res) => {
     const results = [];
     const teacherMap = new Map();
 
-    await session.withTransaction(async () => {
-      // Process teachers first
-      const teacherData = users.filter((user) => user.role === "teacher");
+    // Process teachers first
+    const teacherData = users.filter((user) => user.role === "teacher");
 
-      // Process each teacher individually
-      for (const userData of teacherData) {
-        const email = userData.email.toLowerCase();
+    // Process each teacher individually
+    for (const userData of teacherData) {
+      const email = userData.email.toLowerCase();
 
-        // Check if user already exists
-        const existingUser = await User.findOne({ email }).session(session);
-        if (existingUser) {
-          throw new Error(`User with email ${email} already exists`);
-        }
+      // Check if user already exists
+      const existingUser = await User.findOne({
+        where: { email },
+        transaction,
+      });
 
-        // Create user document
-        const user = new User({
-          ...userData,
-          email: email,
-        });
-        await user.save({ session });
-
-        // Create teacher document
-        const teacher = new Teacher({
-          user: user._id,
-          email: email,
-          courses: [],
-        });
-        await teacher.save({ session });
-
-        // Store in map for quick lookup when processing students
-        teacherMap.set(email, teacher);
-
-        // Add to results
-        results.push({
-          _id: user._id.toString(),
-          email: user.email,
-          role: user.role,
-          createdAt: user.createdAt,
-        });
+      if (existingUser) {
+        throw new Error(`User with email ${email} already exists`);
       }
 
-      // Process students
-      const studentData = users.filter((user) => user.role === "student");
+      // Create user record
+      const user = await User.create(
+        {
+          ...userData,
+          email: email,
+        },
+        { transaction }
+      );
 
-      for (const userData of studentData) {
-        const email = userData.email.toLowerCase();
-        const teacherEmail = userData.teacherEmail.toLowerCase();
+      // Create teacher record
+      const teacher = await Teacher.create(
+        {
+          userId: user.id,
+          email: email,
+        },
+        { transaction }
+      );
 
-        // Check if user already exists
-        const existingUser = await User.findOne({ email }).session(session);
-        if (existingUser) {
-          throw new Error(`User with email ${email} already exists`);
-        }
+      // Store in map for quick lookup when processing students
+      teacherMap.set(email, teacher);
 
-        // Find the teacher
-        let teacher = teacherMap.get(teacherEmail);
+      // Add to results
+      results.push({
+        id: user.id,
+        email: user.email,
+        role: user.role,
+        createdAt: user.createdAt,
+      });
+    }
+
+    // Process students
+    const studentData = users.filter((user) => user.role === "student");
+
+    for (const userData of studentData) {
+      const email = userData.email.toLowerCase();
+      const teacherEmail = userData.teacherEmail.toLowerCase();
+
+      // Check if user already exists
+      const existingUser = await User.findOne({
+        where: { email },
+        transaction,
+      });
+
+      if (existingUser) {
+        throw new Error(`User with email ${email} already exists`);
+      }
+
+      // Find the teacher
+      let teacher = teacherMap.get(teacherEmail);
+      if (!teacher) {
+        teacher = await Teacher.findOne({
+          where: { email: teacherEmail },
+          transaction,
+        });
+
         if (!teacher) {
-          teacher = await Teacher.findOne({ email: teacherEmail }).session(
-            session
+          throw new Error(
+            `Teacher with email ${teacherEmail} not found for student: ${email}`
           );
-          if (!teacher) {
-            throw new Error(
-              `Teacher with email ${teacherEmail} not found for student: ${email}`
-            );
-          }
         }
+      }
 
-        // Create user document
-        const user = new User({
+      // Create user document
+      const user = await User.create(
+        {
           ...userData,
           email: email,
-        });
-        await user.save({ session });
+        },
+        { transaction }
+      );
 
-        // Create student document
-        const student = new Student({
-          user: user._id,
-          teacher: teacher._id,
+      // Create student document
+      const student = await Student.create(
+        {
+          userId: user.id,
+          teacherId: teacher.id,
           teacherEmail: teacher.email,
-          courses: [],
-        });
-        await student.save({ session });
+        },
+        { transaction }
+      );
 
-        // Add to results
-        results.push({
-          _id: user._id.toString(),
-          email: user.email,
-          role: user.role,
-          createdAt: user.createdAt,
-          teacherEmail: teacher.email,
-        });
-      }
-    });
+      // Add to results
+      results.push({
+        id: user.id,
+        email: user.email,
+        role: user.role,
+        createdAt: user.createdAt,
+        teacherEmail: teacher.email,
+      });
+    }
 
-    await session.endSession();
+    // Commit transaction
+    await transaction.commit();
 
     // Return results as array
     return res.status(201).json(results);
   } catch (error) {
-    await session.endSession();
+    // Rollback transaction on error
+    await transaction.rollback();
     console.error("Upload error:", error);
 
     return res.status(400).json({
@@ -131,33 +145,39 @@ const uploadUsers = async (req, res) => {
       details: process.env.NODE_ENV === "development" ? error.stack : undefined,
     });
   }
-};
+});
+
+// Get students for the currently authenticated teacher
 const getMyStudents = catchAsyncErrors(async (req, res, next) => {
   console.log("getMyStudents: Started");
 
   // Extract user info from JWT token (set by auth middleware)
-  const userId = req.user._id;
+  const userId = req.user.id;
   console.log(`Authenticated user ID: ${userId}`);
 
   // Find the teacher profile for this user
-  const teacher = await Teacher.findOne({ user: userId });
+  const teacher = await Teacher.findOne({
+    where: { userId },
+    include: [{ model: User, attributes: ["name", "email"] }],
+  });
+
   if (!teacher) {
     console.log("Teacher profile not found for authenticated user");
     return next(new ErrorHandler("Teacher profile not found", 404));
   }
 
-  console.log(`Found teacher with ID: ${teacher._id}, Email: ${teacher.email}`);
+  console.log(`Found teacher with ID: ${teacher.id}, Email: ${teacher.email}`);
 
   // Find all students associated with this teacher
-  const students = await Student.find({ teacher: teacher._id })
-    .populate({
-      path: "user",
-      select: "name email",
-    })
-    .populate({
-      path: "enrolledCourses.course",
-      select: "title description",
-    });
+  const students = await Student.findAll({
+    where: { teacherId: teacher.id },
+    include: [
+      {
+        model: User,
+        attributes: ["name", "email"],
+      },
+    ],
+  });
 
   if (!students || students.length === 0) {
     console.log("No students found for this teacher");
@@ -165,9 +185,9 @@ const getMyStudents = catchAsyncErrors(async (req, res, next) => {
       success: true,
       message: "No students found for this teacher",
       teacherInfo: {
-        id: teacher._id,
+        id: teacher.id,
         email: teacher.email,
-        name: req.user.name,
+        name: teacher.User.name,
       },
       students: [],
     });
@@ -177,26 +197,20 @@ const getMyStudents = catchAsyncErrors(async (req, res, next) => {
 
   // Format student data
   const formattedStudents = students.map((student) => ({
-    id: student._id,
-    name: student.user ? student.user.name : "Unknown",
-    email: student.email,
+    id: student.id,
+    name: student.User ? student.User.name : "Unknown",
+    email: student.User ? student.User.email : "",
     program: student.program,
     semester: student.semester,
-    enrolledCourses: student.enrolledCourses.map((course) => ({
-      courseId: course.course?._id || course.course,
-      courseTitle: course.course?.title || "Unknown Course",
-      status: course.status,
-      enrolledOn: course.enrolledOn,
-    })),
   }));
 
   res.status(200).json({
     success: true,
     count: students.length,
     teacherInfo: {
-      id: teacher._id,
+      id: teacher.id,
       email: teacher.email,
-      name: req.user.name,
+      name: teacher.User.name,
     },
     students: formattedStudents,
   });
@@ -210,9 +224,8 @@ const getStudentsByTeacherId = catchAsyncErrors(async (req, res, next) => {
   console.log(`Getting students for teacher ID: ${teacherId}`);
 
   // Check if teacher exists
-  const teacher = await Teacher.findById(teacherId).populate({
-    path: "user",
-    select: "name email",
+  const teacher = await Teacher.findByPk(teacherId, {
+    include: [{ model: User, attributes: ["name", "email"] }],
   });
 
   if (!teacher) {
@@ -221,15 +234,15 @@ const getStudentsByTeacherId = catchAsyncErrors(async (req, res, next) => {
   }
 
   // Find all students associated with this teacher
-  const students = await Student.find({ teacher: teacherId })
-    .populate({
-      path: "user",
-      select: "name email",
-    })
-    .populate({
-      path: "enrolledCourses.course",
-      select: "title description",
-    });
+  const students = await Student.findAll({
+    where: { teacherId },
+    include: [
+      {
+        model: User,
+        attributes: ["name", "email"],
+      },
+    ],
+  });
 
   if (!students || students.length === 0) {
     console.log("No students found for this teacher");
@@ -237,9 +250,9 @@ const getStudentsByTeacherId = catchAsyncErrors(async (req, res, next) => {
       success: true,
       message: "No students found for this teacher",
       teacherInfo: {
-        id: teacher._id,
+        id: teacher.id,
         email: teacher.email,
-        name: teacher.user ? teacher.user.name : "Unknown",
+        name: teacher.User ? teacher.User.name : "Unknown",
       },
       students: [],
     });
@@ -249,26 +262,20 @@ const getStudentsByTeacherId = catchAsyncErrors(async (req, res, next) => {
 
   // Format student data
   const formattedStudents = students.map((student) => ({
-    id: student._id,
-    name: student.user ? student.user.name : "Unknown",
-    email: student.email,
+    id: student.id,
+    name: student.User ? student.User.name : "Unknown",
+    email: student.User ? student.User.email : "",
     program: student.program,
     semester: student.semester,
-    enrolledCourses: student.enrolledCourses.map((course) => ({
-      courseId: course.course?._id || course.course,
-      courseTitle: course.course?.title || "Unknown Course",
-      status: course.status,
-      enrolledOn: course.enrolledOn,
-    })),
   }));
 
   res.status(200).json({
     success: true,
     count: students.length,
     teacherInfo: {
-      id: teacher._id,
+      id: teacher.id,
       email: teacher.email,
-      name: teacher.user ? teacher.user.name : "Unknown",
+      name: teacher.User ? teacher.User.name : "Unknown",
     },
     students: formattedStudents,
   });

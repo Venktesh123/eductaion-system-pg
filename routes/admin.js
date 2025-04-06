@@ -7,21 +7,23 @@ const uploadMiddleware = require("../middleware/upload");
 
 // Test route to verify router is working
 router.get("/test", (req, res) => {
-  res.json({ message: "Auth routes working" });
+  res.json({ message: "Admin routes working" });
 });
 
-// Simplified file upload route for testing
+// Upload users from Excel file
 router.post(
   "/upload-users",
   auth,
   checkRole(["admin"]),
-  uploadMiddleware, // Now a direct middleware, not a factory function
+  uploadMiddleware,
   adminController.uploadUsers
 );
+
+// Get my students (for teacher)
 router.get(
   "/my-students",
-  auth, // Authentication middleware
-  checkRole(["teacher", "student"]), // Role check middleware
+  auth,
+  checkRole(["teacher"]),
   adminController.getMyStudents
 );
 
@@ -29,7 +31,7 @@ router.get(
 router.get(
   "/teacher/:teacherId/students",
   auth,
-  checkRole(["teacher", "student"]),
+  checkRole(["admin", "teacher"]),
   adminController.getStudentsByTeacherId
 );
 

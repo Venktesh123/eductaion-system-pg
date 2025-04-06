@@ -1,55 +1,55 @@
 const express = require("express");
 const router = express.Router();
+const econtentController = require("../controllers/econtentController");
 const auth = require("../middleware/auth");
 const { checkRole } = require("../middleware/roleCheck");
-const eContentController = require("../controllers/econtentController");
 
-// Create a module for a course's EContent
+// Create a new module for a course's EContent (teacher only)
 router.post(
   "/course/:courseId/econtent",
   auth,
   checkRole(["teacher"]),
-  eContentController.createEContent
+  econtentController.createEContent
 );
 
-// Get EContent for a specific course
+// Get all EContent for a specific course
 router.get(
   "/course/:courseId/econtent",
   auth,
   checkRole(["teacher", "student"]),
-  eContentController.getEContentByCourse
+  econtentController.getEContentByCourse
 );
 
-// Get specific module by ID
+// Get a specific module by ID
 router.get(
   "/course/:courseId/econtent/module/:moduleId",
   auth,
   checkRole(["teacher", "student"]),
-  eContentController.getModuleById
+  econtentController.getModuleById
 );
 
-// Update a module
+// Update a module (teacher only)
 router.put(
   "/course/:courseId/econtent/module/:moduleId",
   auth,
   checkRole(["teacher"]),
-  eContentController.updateModule
+  econtentController.updateModule
 );
 
-// Delete a module and all its files
+// Delete a module and all its files (teacher only)
 router.delete(
   "/course/:courseId/econtent/module/:moduleId",
   auth,
   checkRole(["teacher"]),
-  eContentController.deleteModule
+  econtentController.deleteModule
 );
 
-// Delete a specific file from a module
+// Delete a specific file from a module (teacher only)
 router.delete(
   "/course/:courseId/econtent/module/:moduleId/file/:fileId",
   auth,
   checkRole(["teacher"]),
-  eContentController.deleteFile
+  econtentController.deleteFile
 );
 
 module.exports = router;

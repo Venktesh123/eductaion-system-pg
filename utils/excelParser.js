@@ -1,14 +1,16 @@
 const XLSX = require("xlsx");
-const fs = require("fs").promises; // Using promises version of fs
 const { validateUserData } = require("./validation");
 
-const parseExcelFile = async (filePath) => {
+/**
+ * Parse an Excel file from a buffer
+ * @param {Buffer} buffer - Excel file buffer
+ * @returns {Promise<Array>} - Array of validated data objects
+ */
+const parseExcelBuffer = async (buffer) => {
   try {
-    // Read file using Node's fs.promises
-    const buffer = await fs.readFile(filePath);
-
+    // Read workbook from buffer
     const workbook = XLSX.read(buffer, {
-      type: "buffer", // Changed from 'array' to 'buffer'
+      type: "buffer",
       cellDates: true,
       cellNF: false,
       cellText: false,
@@ -19,7 +21,10 @@ const parseExcelFile = async (filePath) => {
       throw new Error("Excel file is empty or invalid");
     }
 
+    // Get first sheet
     const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
+
+    // Convert to JSON
     const data = XLSX.utils.sheet_to_json(firstSheet);
 
     if (!data || !data.length) {
@@ -39,7 +44,7 @@ const parseExcelFile = async (filePath) => {
           );
         }
 
-        if (!["teacher", "student"].includes(row.role)) {
+        if (!["teacher", "student", "admin"].includes(row.role)) {
           throw new Error(`Invalid role "${row.role}" for user ${row.email}`);
         }
 
@@ -57,7 +62,7 @@ const parseExcelFile = async (filePath) => {
             role: validatedData.role,
             teacherEmail: validatedData.teacherEmail
               ? validatedData.teacherEmail.toLowerCase()
-              : "",
+              : undefined,
           });
         } else {
           errors.push(`Validation failed for row: ${JSON.stringify(row)}`);
@@ -81,6 +86,26 @@ const parseExcelFile = async (filePath) => {
 
     return validatedRows;
   } catch (error) {
+    // Add context to error
+    throw new Error(`Error parsing Excel file: ${error.message}`);
+  }
+};
+
+/**
+ * Parse an Excel file from a path
+ * @param {String} filePath - Path to Excel file
+ * @returns {Promise<Array>} - Array of validated data objects
+ */
+const parseExcelFile = async (filePath) => {
+  try {
+    // Use the fs module from Node.js
+    const fs = require("fs").promises;
+
+    // Read file using Node's fs.promises
+    const buffer = await fs.readFile(filePath);
+
+    return parseExcelBuffer(buffer);
+  } catch (error) {
     // Handle specific file system errors
     if (error.code === "ENOENT") {
       throw new Error(`File not found: ${filePath}`);
@@ -90,8 +115,29 @@ const parseExcelFile = async (filePath) => {
     }
 
     // Re-throw parsed Excel errors with more context
-    throw new Error(`Error parsing Excel file: ${error.message}`);
+    throw new Error(`Error reading Excel file: ${error.message}`);
   }
 };
 
-module.exports = { parseExcelFile };
+/**
+ * Parse an Excel file from express-fileupload object
+ * @param {Object} fileObject - Express-fileupload object
+ * @returns {Promise<Array>} - Array of validated data objects
+ */
+const parseExcelUpload = async (fileObject) => {
+  try {
+    if (!fileObject || !fileObject.data) {
+      throw new Error("Invalid file upload object");
+    }
+
+    return parseExcelBuffer(fileObject.data);
+  } catch (error) {
+    throw new Error(`Error processing uploaded Excel file: ${error.message}`);
+  }
+};
+
+module.exports = {
+  parseExcelBuffer,
+  parseExcelFile,
+  parseExcelUpload,
+};

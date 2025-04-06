@@ -1,49 +1,44 @@
 const express = require("express");
 const cors = require("cors");
-const connectDB = require("./config/database");
+const { connectDB, sequelize } = require("./config/database");
 const bodyParser = require("body-parser");
 require("dotenv").config();
 const path = require("path");
+const fileUpload = require("express-fileupload");
+const { errorMiddleware } = require("./middleware/errorHandler");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-app.use(express.urlencoded({ extended: true }));
 
 // Middleware
 app.use(cors());
-app.use(express.json());
-const fileUpload = require("express-fileupload");
-
-// IMPORTANT: Configure express-fileupload GLOBALLY rather than per-route
-// This prevents multiple instances from conflicting
+app.use(express.json({ limit: "15mb" }));
+app.use(express.urlencoded({ extended: true, limit: "15mb" }));
 app.use(bodyParser.json({ limit: "50mb" }));
 app.use(bodyParser.urlencoded({ limit: "50mb", extended: true }));
 
 // Configure express-fileupload globally to handle file uploads
-// This keeps the file in memory rather than writing to disk
 app.use(
   fileUpload({
     createParentPath: true,
     limits: {
-      fileSize: 2000 * 1024 * 1024, // 10MB
+      fileSize: 2000 * 1024 * 1024, // 2GB
     },
     abortOnLimit: true,
-    // Don't use tempFiles - we want to keep everything in memory
     useTempFiles: false,
-    // Enable debug if needed
-    debug: false,
+    debug: process.env.NODE_ENV === "development",
   })
 );
 
-// MongoDB Connection
+// Database Connection
 connectDB();
 
 // Routes
 app.get("/", (req, res) => {
   res.send("<h1>Backend Working</h1>");
 });
-app.use(express.json({ limit: "15mb" }));
-app.use(express.urlencoded({ extended: true, limit: "15mb" }));
+
+// API routes
 app.use("/api/admin", require("./routes/admin"));
 app.use("/api/auth", require("./routes/auth"));
 app.use("/api/courses", require("./routes/courses"));
@@ -57,17 +52,32 @@ app.use("/api/econtent", require("./routes/econtent"));
 app.use("/api/students", require("./routes/getStudents"));
 
 // Error handling middleware
-app.use((err, req, res, next) => {
-  console.error(err.stack);
-  res.status(500).json({ error: "Internal Server Error" });
-});
+app.use(errorMiddleware);
 
 // Handle 404 routes
 app.use((req, res) => {
   res.status(404).json({ error: "Route not found" });
 });
 
-// Start server
-app.listen(PORT, () => {
-  console.log(`Server is running on port ${PORT}`);
-});
+// Sync database and start server
+const startServer = async () => {
+  try {
+    // Sync all models with database
+    // Note: In production, you would typically use migrations instead
+    if (process.env.NODE_ENV === "development") {
+      console.log("Syncing database models...");
+      await sequelize.sync({ alter: true });
+      console.log("Database synced!");
+    }
+
+    // Start server
+    app.listen(PORT, () => {
+      console.log(`Server is running on port ${PORT}`);
+    });
+  } catch (error) {
+    console.error("Failed to start server:", error);
+    process.exit(1);
+  }
+};
+
+startServer();

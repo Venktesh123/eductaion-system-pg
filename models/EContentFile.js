@@ -1,44 +1,37 @@
 const { DataTypes } = require("sequelize");
 const { sequelize } = require("../config/database");
 
-const Event = sequelize.define(
-  "Event",
+const EContentFile = sequelize.define(
+  "EContentFile",
   {
     id: {
       type: DataTypes.UUID,
       defaultValue: DataTypes.UUIDV4,
       primaryKey: true,
     },
-    name: {
+    moduleId: {
+      type: DataTypes.UUID,
+      allowNull: false,
+    },
+    fileType: {
+      type: DataTypes.ENUM("pdf", "ppt", "pptx", "other"),
+      allowNull: false,
+    },
+    fileUrl: {
       type: DataTypes.STRING,
       allowNull: false,
     },
-    description: {
-      type: DataTypes.TEXT,
-      allowNull: true,
+    fileKey: {
+      type: DataTypes.STRING,
+      allowNull: false,
     },
-    date: {
+    fileName: {
+      type: DataTypes.STRING,
+      allowNull: false,
+    },
+    uploadDate: {
       type: DataTypes.DATE,
-      allowNull: false,
-    },
-    time: {
-      type: DataTypes.STRING,
-      allowNull: false,
-    },
-    image: {
-      type: DataTypes.STRING,
-      allowNull: false,
-    },
-    location: {
-      type: DataTypes.STRING,
-      allowNull: false,
-    },
-    link: {
-      type: DataTypes.STRING,
-      allowNull: false,
-      validate: {
-        isUrl: true,
-      },
+      defaultValue: DataTypes.NOW,
     },
   },
   {
@@ -46,4 +39,4 @@ const Event = sequelize.define(
   }
 );
 
-module.exports = Event;
+module.exports = EContentFile;

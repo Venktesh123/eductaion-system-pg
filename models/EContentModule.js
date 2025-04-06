@@ -1,25 +1,29 @@
 const { DataTypes } = require("sequelize");
 const { sequelize } = require("../config/database");
 
-const Semester = sequelize.define(
-  "Semester",
+const EContentModule = sequelize.define(
+  "EContentModule",
   {
     id: {
       type: DataTypes.UUID,
       defaultValue: DataTypes.UUIDV4,
       primaryKey: true,
     },
-    name: {
+    eContentId: {
+      type: DataTypes.UUID,
+      allowNull: false,
+    },
+    moduleNumber: {
+      type: DataTypes.INTEGER,
+      allowNull: false,
+    },
+    moduleTitle: {
       type: DataTypes.STRING,
       allowNull: false,
     },
-    startDate: {
-      type: DataTypes.DATE,
-      allowNull: false,
-    },
-    endDate: {
-      type: DataTypes.DATE,
-      allowNull: false,
+    link: {
+      type: DataTypes.STRING,
+      allowNull: true,
     },
   },
   {
@@ -27,4 +31,4 @@ const Semester = sequelize.define(
   }
 );
 
-module.exports = Semester;
+module.exports = EContentModule;

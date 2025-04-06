@@ -1,56 +1,22 @@
-const mongoose = require("mongoose");
+const { DataTypes } = require("sequelize");
+const { sequelize } = require("../config/database");
 
-// Create EContent Schema
-const EContentSchema = new mongoose.Schema(
+const EContent = sequelize.define(
+  "EContent",
   {
-    course: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "Course",
-      required: true,
+    id: {
+      type: DataTypes.UUID,
+      defaultValue: DataTypes.UUIDV4,
+      primaryKey: true,
     },
-    modules: [
-      {
-        moduleNumber: {
-          type: Number,
-          required: true,
-        },
-        moduleTitle: {
-          type: String,
-          required: true,
-        },
-        link: {
-          type: String,
-          default: "",
-        },
-        files: [
-          {
-            fileType: {
-              type: String,
-              enum: ["pdf", "ppt", "pptx", "other"],
-              required: true,
-            },
-            fileUrl: {
-              type: String,
-              required: true,
-            },
-            fileKey: {
-              type: String,
-              required: true,
-            },
-            fileName: {
-              type: String,
-              required: true,
-            },
-            uploadDate: {
-              type: Date,
-              default: Date.now,
-            },
-          },
-        ],
-      },
-    ],
+    courseId: {
+      type: DataTypes.UUID,
+      allowNull: false,
+    },
   },
-  { timestamps: true }
+  {
+    timestamps: true,
+  }
 );
 
-module.exports = mongoose.model("EContent", EContentSchema);
+module.exports = EContent;

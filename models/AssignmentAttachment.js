@@ -1,26 +1,25 @@
 const { DataTypes } = require("sequelize");
 const { sequelize } = require("../config/database");
 
-const Teacher = sequelize.define(
-  "Teacher",
+const AssignmentAttachment = sequelize.define(
+  "AssignmentAttachment",
   {
     id: {
       type: DataTypes.UUID,
       defaultValue: DataTypes.UUIDV4,
       primaryKey: true,
     },
-    email: {
-      type: DataTypes.STRING,
-      allowNull: false,
-      unique: true,
-      validate: {
-        isEmail: true,
-      },
-    },
-    userId: {
+    assignmentId: {
       type: DataTypes.UUID,
       allowNull: false,
-      unique: true,
+    },
+    name: {
+      type: DataTypes.STRING,
+      allowNull: false,
+    },
+    url: {
+      type: DataTypes.STRING,
+      allowNull: false,
     },
   },
   {
@@ -28,4 +27,4 @@ const Teacher = sequelize.define(
   }
 );
 
-module.exports = Teacher;
+module.exports = AssignmentAttachment;

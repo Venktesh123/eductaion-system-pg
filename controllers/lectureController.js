@@ -1,214 +1,176 @@
-const Course = require("../models/Course");
-const Teacher = require("../models/Teacher");
-const Student = require("../models/Student");
-const Lecture = require("../models/Lecture");
-const mongoose = require("mongoose");
-const AWS = require("aws-sdk");
-
-// Better logging setup - replace with your preferred logging library
-const logger = {
-  info: (message) => console.log(`[INFO] ${message}`),
-  error: (message, error) => console.error(`[ERROR] ${message}`, error),
-};
-
-// Configure AWS SDK
-const s3 = new AWS.S3({
-  accessKeyId: process.env.AWS_ACCESS_KEY_ID,
-  secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
-  region: process.env.AWS_REGION,
-});
-
-// Upload file to S3
-const uploadFileToS3 = async (file, path) => {
-  console.log("Uploading file to S3");
-  return new Promise((resolve, reject) => {
-    // Make sure we have the file data in the right format for S3
-    const fileContent = file.data;
-    if (!fileContent) {
-      console.log("No file content found");
-      return reject(new Error("No file content found"));
-    }
-
-    // Generate a unique filename
-    const fileName = `${path}/${Date.now()}-${file.name.replace(/\s+/g, "-")}`;
-
-    // Set up the S3 upload parameters
-    const params = {
-      Bucket: process.env.AWS_S3_BUCKET_NAME,
-      Key: fileName,
-      Body: fileContent,
-      ContentType: file.mimetype,
-    };
-
-    console.log("S3 upload params prepared");
-
-    // Upload to S3
-    s3.upload(params, (err, data) => {
-      if (err) {
-        console.log("S3 upload error:", err);
-        return reject(err);
-      }
-      console.log("File uploaded successfully:", fileName);
-      resolve({
-        url: data.Location,
-        key: data.Key,
-      });
-    });
-  });
-};
-
-// Delete file from S3
-const deleteFileFromS3 = async (key) => {
-  console.log("Deleting file from S3:", key);
-  return new Promise((resolve, reject) => {
-    if (!key) {
-      console.log("No file key provided");
-      return resolve({ message: "No file key provided" });
-    }
-
-    const params = {
-      Bucket: process.env.AWS_S3_BUCKET_NAME,
-      Key: key,
-    };
-
-    s3.deleteObject(params, (err, data) => {
-      if (err) {
-        console.log("S3 delete error:", err);
-        return reject(err);
-      }
-      console.log("File deleted successfully from S3");
-      resolve(data);
-    });
-  });
-};
+const {
+  Course,
+  Teacher,
+  Student,
+  Lecture,
+  User,
+  sequelize,
+} = require("../models");
+const { ErrorHandler } = require("../middleware/errorHandler");
+const catchAsyncErrors = require("../middleware/catchAsyncErrors");
+const { uploadFileToS3, deleteFileFromS3 } = require("../utils/s3Utils");
 
 // Create a new lecture
-const createLecture = async function (req, res) {
+const createLecture = catchAsyncErrors(async (req, res, next) => {
+  const transaction = await sequelize.transaction();
+
   try {
-    logger.info(
+    console.log(
       `Creating lecture for course ID: ${
-        req.params.courseId || req.body.course
+        req.params.courseId || req.body.courseId
       }`
     );
 
-    const teacher = await Teacher.findOne({ user: req.user.id });
-    if (!teacher) {
-      logger.error(`Teacher not found for user ID: ${req.user.id}`);
-      return res.status(404).json({ error: "Teacher not found" });
-    }
-
-    // Determine course ID from params or body
-    const courseId = req.params.courseId;
+    // Get course ID
+    const courseId = req.params.courseId || req.body.courseId;
     if (!courseId) {
-      return res.status(400).json({ error: "Course ID is required" });
+      await transaction.rollback();
+      return next(new ErrorHandler("Course ID is required", 400));
     }
 
+    // Verify teacher permissions
+    const teacher = await Teacher.findOne({
+      where: { userId: req.user.id },
+      transaction,
+    });
+
+    if (!teacher) {
+      console.log(`Teacher not found for user ID: ${req.user.id}`);
+      await transaction.rollback();
+      return next(new ErrorHandler("Teacher not found", 404));
+    }
+
+    // Get the course and verify ownership
     const course = await Course.findOne({
-      _id: courseId,
-      teacher: teacher._id,
+      where: {
+        id: courseId,
+        teacherId: teacher.id,
+      },
+      transaction,
     });
 
     if (!course) {
-      logger.error(`Course not found with ID: ${courseId}`);
-      return res.status(404).json({ error: "Course not found" });
+      console.log(`Course not found with ID: ${courseId}`);
+      await transaction.rollback();
+      return next(new ErrorHandler("Course not found or unauthorized", 404));
     }
 
-    // Check if video file was uploaded
-    if (!req.files || !req.files.video) {
-      return res.status(400).json({ error: "Video file is required" });
-    }
-
-    // Upload video to S3
-    const videoFile = req.files.video;
-    // Validate file type (ensure it's an mp4)
-    if (!videoFile.mimetype.startsWith("video/")) {
-      return res.status(400).json({ error: "Uploaded file must be a video" });
-    }
-
-    // Upload to S3
-    const uploadPath = `courses/${course._id}/lectures`;
-    const uploadResult = await uploadFileToS3(videoFile, uploadPath);
-
-    // Create the lecture with default isReviewed = false and reviewDeadline = now + 7 days
-    const lectureData = {
+    // Create lecture data object
+    let lectureData = {
       title: req.body.title,
-      content: req.body.content,
-      videoUrl: uploadResult.url,
-      videoKey: uploadResult.key,
-      course: course._id,
+      content: req.body.content || null,
+      courseId: course.id,
       isReviewed: req.body.isReviewed || false,
     };
 
-    // If manual review deadline is provided, use it
+    // Add review deadline if provided
     if (req.body.reviewDeadline) {
       lectureData.reviewDeadline = new Date(req.body.reviewDeadline);
     }
 
-    const lecture = new Lecture(lectureData);
-    await lecture.save();
+    // Handle video file upload if provided
+    if (req.files && req.files.video) {
+      const videoFile = req.files.video;
 
-    // Add lecture to course's lectures array
-    course.lectures.push(lecture._id);
-    await course.save();
+      // Validate file type
+      if (!videoFile.mimetype.startsWith("video/")) {
+        await transaction.rollback();
+        return next(new ErrorHandler("Uploaded file must be a video", 400));
+      }
 
-    logger.info(`Created lecture ID: ${lecture._id}`);
-    res.status(201).json(lecture);
+      try {
+        // Upload to S3
+        const uploadPath = `courses/${course.id}/lectures`;
+        const uploadResult = await uploadFileToS3(videoFile, uploadPath);
+
+        lectureData.videoUrl = uploadResult.url;
+        lectureData.videoKey = uploadResult.key;
+      } catch (uploadError) {
+        console.error("Error uploading video:", uploadError);
+        await transaction.rollback();
+        return next(new ErrorHandler("Failed to upload video", 500));
+      }
+    } else if (req.body.videoUrl) {
+      // If video URL is provided directly (e.g., external URL)
+      lectureData.videoUrl = req.body.videoUrl;
+    }
+
+    // Create the lecture
+    const lecture = await Lecture.create(lectureData, { transaction });
+
+    await transaction.commit();
+
+    console.log(`Created lecture ID: ${lecture.id}`);
+    res.status(201).json({
+      success: true,
+      message: "Lecture created successfully",
+      lecture,
+    });
   } catch (error) {
-    logger.error("Error in createLecture:", error);
-    res.status(400).json({ error: error.message });
+    await transaction.rollback();
+    console.error("Error in createLecture:", error);
+    return next(new ErrorHandler(error.message, 500));
   }
-};
+});
 
 // Update an existing lecture
-const updateLecture = async function (req, res) {
+const updateLecture = catchAsyncErrors(async (req, res, next) => {
+  const transaction = await sequelize.transaction();
+
   try {
     const lectureId = req.params.lectureId || req.params.id;
-    logger.info(`Updating lecture ID: ${lectureId}`);
+    console.log(`Updating lecture ID: ${lectureId}`);
 
-    const teacher = await Teacher.findOne({ user: req.user.id });
+    // Verify teacher permissions
+    const teacher = await Teacher.findOne({
+      where: { userId: req.user.id },
+      transaction,
+    });
+
     if (!teacher) {
-      logger.error(`Teacher not found for user ID: ${req.user.id}`);
-      return res.status(404).json({ error: "Teacher not found" });
+      console.log(`Teacher not found for user ID: ${req.user.id}`);
+      await transaction.rollback();
+      return next(new ErrorHandler("Teacher not found", 404));
     }
 
-    // Find lecture and verify course ownership
-    const lecture = await Lecture.findById(lectureId);
+    // Find lecture
+    const lecture = await Lecture.findByPk(lectureId, { transaction });
     if (!lecture) {
-      logger.error(`Lecture not found with ID: ${lectureId}`);
-      return res.status(404).json({ error: "Lecture not found" });
+      console.log(`Lecture not found with ID: ${lectureId}`);
+      await transaction.rollback();
+      return next(new ErrorHandler("Lecture not found", 404));
     }
 
-    // If courseId is in params, verify it matches lecture's course
-    if (
-      req.params.courseId &&
-      lecture.course.toString() !== req.params.courseId
-    ) {
-      logger.error(
-        `Lecture with ID ${lectureId} does not belong to course ${req.params.courseId}`
-      );
-      return res
-        .status(403)
-        .json({ error: "Lecture does not belong to specified course" });
-    }
-
-    // Verify teacher has access to this lecture's course
+    // Verify course belongs to teacher
     const course = await Course.findOne({
-      _id: lecture.course,
-      teacher: teacher._id,
+      where: {
+        id: lecture.courseId,
+        teacherId: teacher.id,
+      },
+      transaction,
     });
 
     if (!course) {
-      logger.error(
+      console.log(
         `Teacher does not have access to course for lecture: ${lectureId}`
       );
-      return res
-        .status(403)
-        .json({ error: "You don't have permission to update this lecture" });
+      await transaction.rollback();
+      return next(
+        new ErrorHandler(
+          "You don't have permission to update this lecture",
+          403
+        )
+      );
     }
 
-    // Update lecture fields
-    if (req.body.title) lecture.title = req.body.title;
-    if (req.body.content) lecture.content = req.body.content;
+    // Create update data object
+    const updateData = {};
+    if (req.body.title !== undefined) updateData.title = req.body.title;
+    if (req.body.content !== undefined) updateData.content = req.body.content;
+    if (req.body.isReviewed !== undefined)
+      updateData.isReviewed = req.body.isReviewed;
+    if (req.body.reviewDeadline)
+      updateData.reviewDeadline = new Date(req.body.reviewDeadline);
 
     // Handle video file update if provided
     if (req.files && req.files.video) {
@@ -216,244 +178,247 @@ const updateLecture = async function (req, res) {
 
       // Validate file type
       if (!videoFile.mimetype.startsWith("video/")) {
-        return res.status(400).json({ error: "Uploaded file must be a video" });
+        await transaction.rollback();
+        return next(new ErrorHandler("Uploaded file must be a video", 400));
       }
 
-      // Delete old video from S3 if it exists
-      if (lecture.videoKey) {
-        try {
+      try {
+        // Delete old video from S3 if it exists
+        if (lecture.videoKey) {
           await deleteFileFromS3(lecture.videoKey);
-        } catch (deleteError) {
-          logger.error("Error deleting old video file:", deleteError);
-          // Continue with upload even if delete fails
         }
+
+        // Upload new video to S3
+        const uploadPath = `courses/${course.id}/lectures`;
+        const uploadResult = await uploadFileToS3(videoFile, uploadPath);
+
+        updateData.videoUrl = uploadResult.url;
+        updateData.videoKey = uploadResult.key;
+      } catch (uploadError) {
+        console.error("Error handling video file:", uploadError);
+        await transaction.rollback();
+        return next(new ErrorHandler("Failed to update video file", 500));
       }
-
-      // Upload new video to S3
-      const uploadPath = `courses/${course._id}/lectures`;
-      const uploadResult = await uploadFileToS3(videoFile, uploadPath);
-
-      lecture.videoUrl = uploadResult.url;
-      lecture.videoKey = uploadResult.key;
+    } else if (req.body.videoUrl !== undefined) {
+      // If video URL is provided directly (e.g., external URL)
+      updateData.videoUrl = req.body.videoUrl;
     }
 
-    // Handle the review status
-    if (req.body.isReviewed !== undefined) {
-      lecture.isReviewed = req.body.isReviewed;
-    }
+    // Update lecture
+    await lecture.update(updateData, { transaction });
 
-    // If review deadline is provided, update it
-    if (req.body.reviewDeadline) {
-      lecture.reviewDeadline = new Date(req.body.reviewDeadline);
-    }
+    await transaction.commit();
 
-    // Auto-check if the deadline has passed
-    const now = new Date();
-    if (
-      !lecture.isReviewed &&
-      lecture.reviewDeadline &&
-      now >= lecture.reviewDeadline
-    ) {
-      lecture.isReviewed = true;
-    }
+    console.log(`Updated lecture ID: ${lecture.id}`);
 
-    await lecture.save();
-    logger.info(`Updated lecture ID: ${lecture._id}`);
-    res.json(lecture);
+    // Get the updated lecture
+    const updatedLecture = await Lecture.findByPk(lecture.id);
+
+    res.json({
+      success: true,
+      message: "Lecture updated successfully",
+      lecture: updatedLecture,
+    });
   } catch (error) {
-    logger.error("Error in updateLecture:", error);
-    res.status(400).json({ error: error.message });
+    await transaction.rollback();
+    console.error("Error in updateLecture:", error);
+    return next(new ErrorHandler(error.message, 500));
   }
-};
-const getCourseLecturesByStudents = async function (req, res) {
+});
+
+// Get all lectures for a course (teacher view)
+const getCourseLectures = catchAsyncErrors(async (req, res, next) => {
   try {
-    logger.info(`Fetching lectures for course ID: ${req.params.courseId}`);
+    console.log(`Fetching lectures for course ID: ${req.params.courseId}`);
 
-    // Find the student based on authenticated user
-    const student = await Student.findOne({ user: req.user.id });
-    if (!student) {
-      logger.error(`Student not found for user ID: ${req.user.id}`);
-      return res.status(404).json({ error: "Student not found" });
+    // Verify teacher permissions
+    const teacher = await Teacher.findOne({
+      where: { userId: req.user.id },
+    });
+
+    if (!teacher) {
+      console.log(`Teacher not found for user ID: ${req.user.id}`);
+      return next(new ErrorHandler("Teacher not found", 404));
     }
 
-    // Find the course by ID
-    const course = await Course.findById(req.params.courseId);
+    // Verify course belongs to teacher
+    const course = await Course.findOne({
+      where: {
+        id: req.params.courseId,
+        teacherId: teacher.id,
+      },
+    });
+
     if (!course) {
-      logger.error(`Course not found with ID: ${req.params.courseId}`);
-      return res.status(404).json({ error: "Course not found" });
+      console.log(`Course not found with ID: ${req.params.courseId}`);
+      return next(new ErrorHandler("Course not found or unauthorized", 404));
     }
 
-    // Check if student is enrolled in this course
-    if (!student.courses.includes(course._id)) {
-      logger.error(
+    // Get lectures for this course
+    const lectures = await Lecture.findAll({
+      where: { courseId: course.id },
+      order: [["createdAt", "ASC"]],
+    });
+
+    // Check if review deadlines have passed
+    const now = new Date();
+    for (const lecture of lectures) {
+      if (
+        !lecture.isReviewed &&
+        lecture.reviewDeadline &&
+        now >= lecture.reviewDeadline
+      ) {
+        await lecture.update({ isReviewed: true });
+      }
+    }
+
+    console.log(`Found ${lectures.length} lectures for course: ${course.id}`);
+    res.json({
+      success: true,
+      courseId: course.id,
+      courseTitle: course.title,
+      lectures,
+    });
+  } catch (error) {
+    console.error("Error in getCourseLectures:", error);
+    return next(new ErrorHandler(error.message, 500));
+  }
+});
+
+// Get all lectures for a course (student view)
+const getCourseLecturesByStudents = catchAsyncErrors(async (req, res, next) => {
+  try {
+    console.log(
+      `Student fetching lectures for course ID: ${req.params.courseId}`
+    );
+
+    // Verify student permissions
+    const student = await Student.findOne({
+      where: { userId: req.user.id },
+    });
+
+    if (!student) {
+      console.log(`Student not found for user ID: ${req.user.id}`);
+      return next(new ErrorHandler("Student not found", 404));
+    }
+
+    // Verify student is enrolled in the course
+    const enrollment = await sequelize.models.StudentCourse.findOne({
+      where: {
+        studentId: student.id,
+        courseId: req.params.courseId,
+      },
+    });
+
+    if (!enrollment) {
+      console.log(
         `Student is not enrolled in course with ID: ${req.params.courseId}`
       );
-      return res
-        .status(403)
-        .json({ error: "You are not enrolled in this course" });
+      return next(new ErrorHandler("You are not enrolled in this course", 403));
     }
 
-    // Find all lectures for this course
-    const lectures = await Lecture.find({
-      course: course._id,
-      // Add any additional criteria like isPublished if needed
-    }).select("title content videoUrl isReviewed createdAt updatedAt");
-
-    // Check for lectures that have passed their review deadline
-    const now = new Date();
-    const updatePromises = lectures.map(async (lecture) => {
-      if (
-        !lecture.isReviewed &&
-        lecture.reviewDeadline &&
-        now >= lecture.reviewDeadline
-      ) {
-        lecture.isReviewed = true;
-        await lecture.save();
-      }
-      return lecture;
+    // Get lectures that are reviewed (students can only see reviewed lectures)
+    const lectures = await Lecture.findAll({
+      where: {
+        courseId: req.params.courseId,
+        isReviewed: true,
+      },
+      attributes: [
+        "id",
+        "title",
+        "content",
+        "videoUrl",
+        "createdAt",
+        "updatedAt",
+      ],
+      order: [["createdAt", "ASC"]],
     });
 
-    // Wait for all updates to complete
-    await Promise.all(updatePromises);
-
-    // Re-fetch lectures to get updated data if needed
-    const updatedLectures = await Lecture.find({
-      course: course._id,
-      // Add any additional criteria if needed
-    }).select("title content videoUrl isReviewed createdAt updatedAt");
-
-    // Return the complete lecture information
-    res.json(updatedLectures);
+    console.log(`Found ${lectures.length} reviewed lectures for student`);
+    res.json({
+      success: true,
+      courseId: req.params.courseId,
+      lectures,
+    });
   } catch (error) {
-    logger.error("Error in getCourseLectures:", error);
-    res.status(500).json({ error: error.message });
+    console.error("Error in getCourseLecturesByStudents:", error);
+    return next(new ErrorHandler(error.message, 500));
   }
-};
-// Get all lectures for a course
-const getCourseLectures = async function (req, res) {
-  try {
-    logger.info(`Fetching lectures for course ID: ${req.params.courseId}`);
+});
 
-    // Find the teacher based on authenticated user
-    const teacher = await Teacher.findOne({ user: req.user.id });
-    if (!teacher) {
-      logger.error(`Teacher not found for user ID: ${req.user.id}`);
-      return res.status(404).json({ error: "Teacher not found" });
-    }
-
-    // Find the course by ID (only contains lecture IDs at this point)
-    const course = await Course.findOne({
-      _id: req.params.courseId,
-      teacher: teacher._id,
-    });
-
-    if (!course) {
-      logger.error(`Course not found with ID: ${req.params.courseId}`);
-      return res.status(404).json({ error: "Course not found" });
-    }
-
-    // Get the array of lecture IDs from the course
-    const lectureIds = course.lectures;
-
-    // Find all lectures using the array of IDs
-    const lectures = await Lecture.find({
-      _id: { $in: lectureIds },
-    });
-
-    // Check for lectures that have passed their review deadline
-    const now = new Date();
-    const updatePromises = lectures.map(async (lecture) => {
-      if (
-        !lecture.isReviewed &&
-        lecture.reviewDeadline &&
-        now >= lecture.reviewDeadline
-      ) {
-        lecture.isReviewed = true;
-        await lecture.save();
-      }
-      return lecture;
-    });
-
-    // Wait for all updates to complete
-    await Promise.all(updatePromises);
-
-    // Re-fetch lectures to get updated data
-    const updatedLectures = await Lecture.find({
-      _id: { $in: lectureIds },
-    });
-
-    // Return the complete lecture information
-    res.json(updatedLectures);
-  } catch (error) {
-    logger.error("Error in getCourseLectures:", error);
-    res.status(500).json({ error: error.message });
-  }
-};
 // Get a specific lecture
-const getLectureById = async function (req, res) {
+const getLectureById = catchAsyncErrors(async (req, res, next) => {
   try {
     const lectureId = req.params.lectureId || req.params.id;
-    logger.info(`Fetching lecture ID: ${lectureId}`);
+    console.log(`Fetching lecture ID: ${lectureId}`);
 
-    // First get the lecture
-    const lecture = await Lecture.findById(lectureId);
+    // Get the lecture
+    const lecture = await Lecture.findByPk(lectureId, {
+      include: [
+        {
+          model: Course,
+          attributes: ["id", "title", "teacherId"],
+        },
+      ],
+    });
 
     if (!lecture) {
-      logger.error(`Lecture not found with ID: ${lectureId}`);
-      return res.status(404).json({ error: "Lecture not found" });
+      console.log(`Lecture not found with ID: ${lectureId}`);
+      return next(new ErrorHandler("Lecture not found", 404));
     }
 
-    // If we're using nested routes, verify the course ID matches
-    if (
-      req.params.courseId &&
-      lecture.course.toString() !== req.params.courseId
-    ) {
-      logger.error(
-        `Lecture with ID ${lectureId} does not belong to course ${req.params.courseId}`
-      );
-      return res
-        .status(403)
-        .json({ error: "Lecture does not belong to specified course" });
-    }
-
-    // For teachers, verify they have access to this lecture's course
+    // Verify permissions based on role
     if (req.user.role === "teacher") {
-      const teacher = await Teacher.findOne({ user: req.user.id });
-      if (!teacher) {
-        logger.error(`Teacher not found for user ID: ${req.user.id}`);
-        return res.status(404).json({ error: "Teacher not found" });
-      }
-
-      const course = await Course.findOne({
-        _id: lecture.course,
-        teacher: teacher._id,
+      const teacher = await Teacher.findOne({
+        where: { userId: req.user.id },
       });
 
-      if (!course) {
-        logger.error(
-          `Teacher does not have access to course for lecture: ${lectureId}`
+      if (!teacher || lecture.Course.teacherId !== teacher.id) {
+        console.log(`Teacher does not have access to lecture: ${lectureId}`);
+        return next(
+          new ErrorHandler(
+            "You don't have permission to view this lecture",
+            403
+          )
         );
-        return res
-          .status(403)
-          .json({ error: "You don't have permission to view this lecture" });
       }
-    }
+    } else if (req.user.role === "student") {
+      const student = await Student.findOne({
+        where: { userId: req.user.id },
+      });
 
-    // For students, verify they are enrolled in this course
-    if (req.user.role === "student") {
-      const student = await Student.findOne({ user: req.user.id });
       if (!student) {
-        logger.error(`Student not found for user ID: ${req.user.id}`);
-        return res.status(404).json({ error: "Student not found" });
+        return next(new ErrorHandler("Student not found", 404));
       }
 
-      if (!student.courses.includes(lecture.course)) {
-        logger.error(
+      // Verify student is enrolled in the course
+      const enrollment = await sequelize.models.StudentCourse.findOne({
+        where: {
+          studentId: student.id,
+          courseId: lecture.courseId,
+        },
+      });
+
+      if (!enrollment) {
+        console.log(
           `Student is not enrolled in course for lecture: ${lectureId}`
         );
-        return res
-          .status(403)
-          .json({ error: "You don't have permission to view this lecture" });
+        return next(
+          new ErrorHandler(
+            "You don't have permission to view this lecture",
+            403
+          )
+        );
+      }
+
+      // Students can only see reviewed lectures
+      if (!lecture.isReviewed) {
+        console.log(
+          `Lecture ${lectureId} is not yet reviewed and cannot be viewed by students`
+        );
+        return next(
+          new ErrorHandler("This lecture is not yet available for viewing", 403)
+        );
       }
     }
 
@@ -464,171 +429,234 @@ const getLectureById = async function (req, res) {
       lecture.reviewDeadline &&
       now >= lecture.reviewDeadline
     ) {
-      lecture.isReviewed = true;
-      await lecture.save();
+      await lecture.update({ isReviewed: true });
     }
 
-    res.json(lecture);
+    res.json({
+      success: true,
+      lecture,
+    });
   } catch (error) {
-    logger.error("Error in getLectureById:", error);
-    res.status(500).json({ error: error.message });
+    console.error("Error in getLectureById:", error);
+    return next(new ErrorHandler(error.message, 500));
   }
-};
+});
 
 // Delete a lecture
-const deleteLecture = async function (req, res) {
-  try {
-    logger.info(`Deleting lecture ID: ${req.params.lectureId}`);
+const deleteLecture = catchAsyncErrors(async (req, res, next) => {
+  const transaction = await sequelize.transaction();
 
-    const teacher = await Teacher.findOne({ user: req.user.id });
+  try {
+    console.log(`Deleting lecture ID: ${req.params.lectureId}`);
+
+    // Verify teacher permissions
+    const teacher = await Teacher.findOne({
+      where: { userId: req.user.id },
+      transaction,
+    });
+
     if (!teacher) {
-      logger.error(`Teacher not found for user ID: ${req.user.id}`);
-      return res.status(404).json({ error: "Teacher not found" });
+      console.log(`Teacher not found for user ID: ${req.user.id}`);
+      await transaction.rollback();
+      return next(new ErrorHandler("Teacher not found", 404));
     }
 
+    // Find lecture
+    const lecture = await Lecture.findByPk(req.params.lectureId, {
+      transaction,
+    });
+    if (!lecture) {
+      console.log(`Lecture not found with ID: ${req.params.lectureId}`);
+      await transaction.rollback();
+      return next(new ErrorHandler("Lecture not found", 404));
+    }
+
+    // Verify course belongs to teacher
     const course = await Course.findOne({
-      _id: req.params.courseId,
-      teacher: teacher._id,
+      where: {
+        id: lecture.courseId,
+        teacherId: teacher.id,
+      },
+      transaction,
     });
 
     if (!course) {
-      logger.error(`Course not found with ID: ${req.params.courseId}`);
-      return res.status(404).json({ error: "Course not found" });
-    }
-
-    const lecture = await Lecture.findOne({
-      _id: req.params.lectureId,
-      course: course._id,
-    });
-
-    if (!lecture) {
-      logger.error(`Lecture not found with ID: ${req.params.lectureId}`);
-      return res.status(404).json({ error: "Lecture not found" });
+      console.log(
+        `Teacher does not have access to course for lecture: ${req.params.lectureId}`
+      );
+      await transaction.rollback();
+      return next(
+        new ErrorHandler(
+          "You don't have permission to delete this lecture",
+          403
+        )
+      );
     }
 
     // Delete video from S3 if it exists
     if (lecture.videoKey) {
       try {
         await deleteFileFromS3(lecture.videoKey);
-        logger.info(`Deleted video from S3: ${lecture.videoKey}`);
+        console.log(`Deleted video from S3: ${lecture.videoKey}`);
       } catch (deleteError) {
-        logger.error("Error deleting video file:", deleteError);
+        console.error("Error deleting video file:", deleteError);
         // Continue with lecture deletion even if S3 delete fails
       }
     }
 
-    // Remove the lecture from the course's lectures array
-    course.lectures = course.lectures.filter((id) => !id.equals(lecture._id));
-    await course.save();
-
     // Delete the lecture
-    await Lecture.findByIdAndDelete(lecture._id);
-    logger.info(`Deleted lecture ID: ${lecture._id}`);
+    await lecture.destroy({ transaction });
 
-    res.json({ message: "Lecture deleted successfully" });
+    await transaction.commit();
+
+    console.log(`Deleted lecture ID: ${req.params.lectureId}`);
+    res.json({
+      success: true,
+      message: "Lecture deleted successfully",
+    });
   } catch (error) {
-    logger.error("Error in deleteLecture:", error);
-    res.status(500).json({ error: error.message });
+    await transaction.rollback();
+    console.error("Error in deleteLecture:", error);
+    return next(new ErrorHandler(error.message, 500));
   }
-};
+});
 
-// Update lecture review status
-const updateLectureReviewStatus = async function (req, res) {
+// Update review status for all lectures in a course
+const updateAllLectureReviewStatuses = catchAsyncErrors(
+  async (req, res, next) => {
+    try {
+      console.log(
+        `Updating review status for all lectures in course ID: ${req.params.courseId}`
+      );
+
+      // Verify teacher permissions
+      const teacher = await Teacher.findOne({
+        where: { userId: req.user.id },
+      });
+
+      if (!teacher) {
+        console.log(`Teacher not found for user ID: ${req.user.id}`);
+        return next(new ErrorHandler("Teacher not found", 404));
+      }
+
+      // Verify course belongs to teacher
+      const course = await Course.findOne({
+        where: {
+          id: req.params.courseId,
+          teacherId: teacher.id,
+        },
+      });
+
+      if (!course) {
+        console.log(`Course not found with ID: ${req.params.courseId}`);
+        return next(new ErrorHandler("Course not found or unauthorized", 404));
+      }
+
+      // Update all lectures with passed review deadlines
+      const now = new Date();
+      const [updatedCount] = await Lecture.update(
+        { isReviewed: true },
+        {
+          where: {
+            courseId: course.id,
+            isReviewed: false,
+            reviewDeadline: { [sequelize.Op.lte]: now },
+          },
+        }
+      );
+
+      console.log(`Updated ${updatedCount} lectures to reviewed status`);
+      res.json({
+        success: true,
+        message: `${updatedCount} lectures were marked as reviewed automatically`,
+        updatedCount,
+      });
+    } catch (error) {
+      console.error("Error in updateAllLectureReviewStatuses:", error);
+      return next(new ErrorHandler(error.message, 500));
+    }
+  }
+);
+
+// Update review status for a specific lecture
+const updateLectureReviewStatus = catchAsyncErrors(async (req, res, next) => {
+  const transaction = await sequelize.transaction();
+
   try {
-    logger.info(
+    console.log(
       `Updating review status for lecture ID: ${req.params.lectureId}`
     );
 
-    const teacher = await Teacher.findOne({ user: req.user.id });
+    // Verify teacher permissions
+    const teacher = await Teacher.findOne({
+      where: { userId: req.user.id },
+      transaction,
+    });
+
     if (!teacher) {
-      logger.error(`Teacher not found for user ID: ${req.user.id}`);
-      return res.status(404).json({ error: "Teacher not found" });
+      console.log(`Teacher not found for user ID: ${req.user.id}`);
+      await transaction.rollback();
+      return next(new ErrorHandler("Teacher not found", 404));
     }
 
+    // Find lecture
+    const lecture = await Lecture.findByPk(req.params.lectureId, {
+      transaction,
+    });
+    if (!lecture) {
+      console.log(`Lecture not found with ID: ${req.params.lectureId}`);
+      await transaction.rollback();
+      return next(new ErrorHandler("Lecture not found", 404));
+    }
+
+    // Verify course belongs to teacher
     const course = await Course.findOne({
-      _id: req.params.courseId,
-      teacher: teacher._id,
+      where: {
+        id: lecture.courseId,
+        teacherId: teacher.id,
+      },
+      transaction,
     });
 
     if (!course) {
-      logger.error(`Course not found with ID: ${req.params.courseId}`);
-      return res.status(404).json({ error: "Course not found" });
-    }
-
-    const lecture = await Lecture.findOne({
-      _id: req.params.lectureId,
-      course: course._id,
-    });
-
-    if (!lecture) {
-      logger.error(`Lecture not found with ID: ${req.params.lectureId}`);
-      return res.status(404).json({ error: "Lecture not found" });
+      console.log(
+        `Teacher does not have access to course for lecture: ${req.params.lectureId}`
+      );
+      await transaction.rollback();
+      return next(
+        new ErrorHandler(
+          "You don't have permission to update this lecture",
+          403
+        )
+      );
     }
 
     // Update review status
-    lecture.isReviewed = req.body.isReviewed;
+    const updateData = {
+      isReviewed: req.body.isReviewed,
+    };
 
-    // If extending the review deadline
+    // Update review deadline if provided
     if (req.body.reviewDeadline) {
-      lecture.reviewDeadline = new Date(req.body.reviewDeadline);
+      updateData.reviewDeadline = new Date(req.body.reviewDeadline);
     }
 
-    await lecture.save();
-    logger.info(`Updated review status for lecture ID: ${lecture._id}`);
+    await lecture.update(updateData, { transaction });
 
-    res.json(lecture);
-  } catch (error) {
-    logger.error("Error in updateLectureReviewStatus:", error);
-    res.status(400).json({ error: error.message });
-  }
-};
+    await transaction.commit();
 
-// Update review status for all lectures in a course
-const updateAllLectureReviewStatuses = async function (req, res) {
-  try {
-    logger.info(
-      `Updating review status for all lectures in course ID: ${req.params.courseId}`
-    );
-
-    const teacher = await Teacher.findOne({ user: req.user.id });
-    if (!teacher) {
-      logger.error(`Teacher not found for user ID: ${req.user.id}`);
-      return res.status(404).json({ error: "Teacher not found" });
-    }
-
-    const course = await Course.findOne({
-      _id: req.params.courseId,
-      teacher: teacher._id,
-    });
-
-    if (!course) {
-      logger.error(`Course not found with ID: ${req.params.courseId}`);
-      return res.status(404).json({ error: "Course not found" });
-    }
-
-    // Update all lectures with passed review deadlines
-    const now = new Date();
-    const result = await Lecture.updateMany(
-      {
-        course: course._id,
-        isReviewed: false,
-        reviewDeadline: { $lte: now },
-      },
-      {
-        $set: { isReviewed: true },
-      }
-    );
-
-    logger.info(`Updated ${result.modifiedCount} lectures to reviewed status`);
+    console.log(`Updated review status for lecture ID: ${lecture.id}`);
     res.json({
-      message: `${result.modifiedCount} lectures were marked as reviewed automatically`,
-      modifiedCount: result.modifiedCount,
+      success: true,
+      message: "Lecture review status updated successfully",
+      lecture: await Lecture.findByPk(lecture.id),
     });
   } catch (error) {
-    logger.error("Error in updateAllLectureReviewStatuses:", error);
-    res.status(500).json({ error: error.message });
+    await transaction.rollback();
+    console.error("Error in updateLectureReviewStatus:", error);
+    return next(new ErrorHandler(error.message, 500));
   }
-};
+});
 
 module.exports = {
   createLecture,

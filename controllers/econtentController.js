@@ -1,53 +1,17 @@
-const mongoose = require("mongoose");
-const EContent = require("../models/EContent");
-const Course = require("../models/Course");
+const {
+  EContent,
+  EContentModule,
+  EContentFile,
+  Course,
+  Teacher,
+  Student,
+  sequelize,
+} = require("../models");
 const { ErrorHandler } = require("../middleware/errorHandler");
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
-const AWS = require("aws-sdk");
+const { uploadFileToS3, deleteFileFromS3 } = require("../utils/s3Utils");
 
-// Configure AWS S3
-const s3 = new AWS.S3({
-  accessKeyId: process.env.AWS_ACCESS_KEY_ID,
-  secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
-  region: process.env.AWS_REGION,
-});
-
-// Upload file to S3
-const uploadFileToS3 = async (file, path) => {
-  console.log("Uploading file to S3");
-  return new Promise((resolve, reject) => {
-    // Make sure we have the file data in the right format for S3
-    const fileContent = file.data;
-    if (!fileContent) {
-      console.log("No file content found");
-      return reject(new Error("No file content found"));
-    }
-    // Generate a unique filename
-    const fileName = `${path}/${Date.now()}-${file.name.replace(/\s+/g, "-")}`;
-    // Set up the S3 upload parameters without ACL
-    const params = {
-      Bucket: process.env.AWS_S3_BUCKET_NAME,
-      Key: fileName,
-      Body: fileContent,
-      ContentType: file.mimetype,
-    };
-    console.log("S3 upload params prepared");
-    // Upload to S3
-    s3.upload(params, (err, data) => {
-      if (err) {
-        console.log("S3 upload error:", err);
-        return reject(err);
-      }
-      console.log("File uploaded successfully:", fileName);
-      resolve({
-        url: data.Location,
-        key: data.Key,
-      });
-    });
-  });
-};
-
-// Function to handle file uploads - extracted to avoid code duplication
+// Helper function to handle file uploads
 const handleFileUploads = async (files, allowedTypes, next) => {
   console.log("Processing file uploads");
 
@@ -117,7 +81,6 @@ const createFileObjects = (filesArray, uploadedFiles) => {
       fileUrl: uploadedFile.url,
       fileKey: uploadedFile.key,
       fileName,
-      uploadDate: new Date(),
     });
   }
 
@@ -127,14 +90,9 @@ const createFileObjects = (filesArray, uploadedFiles) => {
 // Create new EContent module
 exports.createEContent = catchAsyncErrors(async (req, res, next) => {
   console.log("createEContent: Started");
-  const session = await mongoose.startSession();
-  let transactionStarted = false;
+  const transaction = await sequelize.transaction();
 
   try {
-    await session.startTransaction();
-    transactionStarted = true;
-    console.log("Transaction started");
-
     const { moduleNumber, moduleTitle, link } = req.body;
     const { courseId } = req.params;
 
@@ -143,43 +101,68 @@ exports.createEContent = catchAsyncErrors(async (req, res, next) => {
     // Validate inputs
     if (!moduleNumber || !moduleTitle) {
       console.log("Missing required fields");
+      await transaction.rollback();
       return next(
         new ErrorHandler("Module number and title are required", 400)
       );
     }
 
-    // Check if course exists
-    const course = await Course.findById(courseId).session(session);
+    // Check if course exists and belongs to the teacher
+    const teacher = await Teacher.findOne({
+      where: { userId: req.user.id },
+      transaction,
+    });
+
+    if (!teacher) {
+      await transaction.rollback();
+      return next(new ErrorHandler("Teacher not found", 404));
+    }
+
+    const course = await Course.findOne({
+      where: {
+        id: courseId,
+        teacherId: teacher.id,
+      },
+      transaction,
+    });
+
     if (!course) {
       console.log(`Course not found: ${courseId}`);
-      return next(new ErrorHandler("Course not found", 404));
+      await transaction.rollback();
+      return next(new ErrorHandler("Course not found or unauthorized", 404));
     }
     console.log("Course found");
 
     // Find existing EContent document for this course or create new one
-    let eContent = await EContent.findOne({ course: courseId }).session(
-      session
-    );
+    let eContent = await EContent.findOne({
+      where: { courseId },
+      transaction,
+    });
 
     if (!eContent) {
       console.log("Creating new EContent document");
-      eContent = new EContent({
-        course: courseId,
-        modules: [],
-      });
+      eContent = await EContent.create(
+        {
+          courseId,
+        },
+        { transaction }
+      );
     } else {
       console.log("Found existing EContent document");
-
-      // We've removed the module number check to always create a new module
     }
 
-    // Create new module object
-    const newModule = {
-      moduleNumber,
-      moduleTitle,
-      link: link || "", // Add the link field with default empty string if not provided
-      files: [],
-    };
+    // Create new module
+    const newModule = await EContentModule.create(
+      {
+        eContentId: eContent.id,
+        moduleNumber,
+        moduleTitle,
+        link: link || "", // Default empty string if not provided
+      },
+      { transaction }
+    );
+
+    console.log(`E-content module created with ID: ${newModule.id}`);
 
     // Handle file uploads if any
     if (req.files && req.files.files) {
@@ -192,17 +175,27 @@ exports.createEContent = catchAsyncErrors(async (req, res, next) => {
 
         const { filesArray, uploadedFiles } = await handleFileUploads(
           req.files.files,
-          allowedTypes,
-          next
+          allowedTypes
         );
 
         const fileObjects = createFileObjects(filesArray, uploadedFiles);
 
         // Add files to the new module
-        newModule.files = fileObjects;
+        for (const fileObj of fileObjects) {
+          await EContentFile.create(
+            {
+              moduleId: newModule.id,
+              ...fileObj,
+              uploadDate: new Date(),
+            },
+            { transaction }
+          );
+        }
+
         console.log("Files added to new module");
       } catch (uploadError) {
         console.error("Error handling file uploads:", uploadError);
+        await transaction.rollback();
         return next(
           new ErrorHandler(
             uploadError.message || "Failed to upload files",
@@ -212,75 +205,112 @@ exports.createEContent = catchAsyncErrors(async (req, res, next) => {
       }
     }
 
-    // Add new module to eContent
-    eContent.modules.push(newModule);
-
-    console.log("Saving eContent");
-    await eContent.save({ session });
-    console.log(`EContent saved with ID: ${eContent._id}`);
-
-    console.log("Committing transaction");
-    await session.commitTransaction();
-    transactionStarted = false;
+    await transaction.commit();
     console.log("Transaction committed");
+
+    // Get the complete EContent with the new module and files
+    const createdModule = await EContentModule.findByPk(newModule.id, {
+      include: [EContentFile],
+    });
 
     res.status(201).json({
       success: true,
       message: "EContent module created successfully",
       courseId: courseId,
-      eContent,
+      module: createdModule,
     });
   } catch (error) {
     console.log(`Error in createEContent: ${error.message}`);
 
-    if (transactionStarted) {
-      try {
-        console.log("Aborting transaction");
-        await session.abortTransaction();
-        console.log("Transaction aborted");
-      } catch (abortError) {
-        console.error("Error aborting transaction:", abortError);
-      }
+    if (transaction.finished !== "commit") {
+      await transaction.rollback();
     }
 
     return next(new ErrorHandler(error.message, 500));
-  } finally {
-    console.log("Ending session");
-    await session.endSession();
-    console.log("Session ended");
   }
 });
+
 // Get EContent for a course
 exports.getEContentByCourse = catchAsyncErrors(async (req, res, next) => {
   console.log("getEContentByCourse: Started");
   const { courseId } = req.params;
 
-  console.log(`Fetching EContent for course: ${courseId}`);
+  try {
+    console.log(`Fetching EContent for course: ${courseId}`);
 
-  // Check if course exists
-  const course = await Course.findById(courseId);
-  if (!course) {
-    console.log(`Course not found: ${courseId}`);
-    return next(new ErrorHandler("Course not found", 404));
-  }
+    // Check if course exists
+    const course = await Course.findByPk(courseId);
+    if (!course) {
+      console.log(`Course not found: ${courseId}`);
+      return next(new ErrorHandler("Course not found", 404));
+    }
 
-  // Find EContent
-  const eContent = await EContent.findOne({ course: courseId });
-  if (!eContent) {
-    console.log(`No EContent found for course: ${courseId}`);
-    // Just return an empty result instead of an error
-    return res.status(200).json({
+    // If user is a teacher, verify they own the course
+    if (req.user.role === "teacher") {
+      const teacher = await Teacher.findOne({
+        where: { userId: req.user.id },
+      });
+
+      if (!teacher || course.teacherId !== teacher.id) {
+        return next(new ErrorHandler("Unauthorized access", 403));
+      }
+    }
+    // If user is a student, verify they're enrolled in the course
+    else if (req.user.role === "student") {
+      const student = await Student.findOne({
+        where: { userId: req.user.id },
+      });
+
+      if (!student) {
+        return next(new ErrorHandler("Student not found", 404));
+      }
+
+      const enrollment = await sequelize.models.StudentCourse.findOne({
+        where: {
+          studentId: student.id,
+          courseId,
+        },
+      });
+
+      if (!enrollment) {
+        return next(new ErrorHandler("Not enrolled in this course", 403));
+      }
+    }
+
+    // Find EContent with modules and files
+    const eContent = await EContent.findOne({
+      where: { courseId },
+      include: [
+        {
+          model: EContentModule,
+          include: [EContentFile],
+        },
+      ],
+    });
+
+    if (!eContent) {
+      console.log(`No EContent found for course: ${courseId}`);
+      // Return empty structure instead of error
+      return res.status(200).json({
+        success: true,
+        courseId: courseId,
+        eContent: {
+          id: null,
+          courseId,
+          modules: [],
+        },
+      });
+    }
+
+    res.status(200).json({
       success: true,
       courseId: courseId,
-      eContent: { course: courseId, modules: [] },
+      eContent,
     });
+  } catch (error) {
+    console.log(`Error in getEContentByCourse: ${error.message}`);
+    return next(new ErrorHandler(error.message, 500));
   }
-
-  res.status(200).json({
-    success: true,
-    courseId: courseId,
-    eContent,
-  });
 });
 
 // Get specific module by ID
@@ -288,66 +318,151 @@ exports.getModuleById = catchAsyncErrors(async (req, res, next) => {
   console.log("getModuleById: Started");
   const { courseId, moduleId } = req.params;
 
-  console.log(`Fetching module ${moduleId} for course: ${courseId}`);
+  try {
+    console.log(`Fetching module ${moduleId} for course: ${courseId}`);
 
-  // Find EContent
-  const eContent = await EContent.findOne({ course: courseId });
-  if (!eContent) {
-    console.log(`No EContent found for course: ${courseId}`);
-    return next(new ErrorHandler("No EContent found for this course", 404));
+    // Check course access
+    const course = await Course.findByPk(courseId);
+    if (!course) {
+      return next(new ErrorHandler("Course not found", 404));
+    }
+
+    // Verify access rights
+    if (req.user.role === "teacher") {
+      const teacher = await Teacher.findOne({
+        where: { userId: req.user.id },
+      });
+
+      if (!teacher || course.teacherId !== teacher.id) {
+        return next(new ErrorHandler("Unauthorized access", 403));
+      }
+    } else if (req.user.role === "student") {
+      const student = await Student.findOne({
+        where: { userId: req.user.id },
+      });
+
+      if (!student) {
+        return next(new ErrorHandler("Student not found", 404));
+      }
+
+      const enrollment = await sequelize.models.StudentCourse.findOne({
+        where: {
+          studentId: student.id,
+          courseId,
+        },
+      });
+
+      if (!enrollment) {
+        return next(new ErrorHandler("Not enrolled in this course", 403));
+      }
+    }
+
+    // Find EContent for this course
+    const eContent = await EContent.findOne({
+      where: { courseId },
+    });
+
+    if (!eContent) {
+      console.log(`No EContent found for course: ${courseId}`);
+      return next(new ErrorHandler("No EContent found for this course", 404));
+    }
+
+    // Find specific module
+    const module = await EContentModule.findOne({
+      where: {
+        id: moduleId,
+        eContentId: eContent.id,
+      },
+      include: [EContentFile],
+    });
+
+    if (!module) {
+      console.log(`Module not found: ${moduleId}`);
+      return next(new ErrorHandler("Module not found", 404));
+    }
+
+    res.status(200).json({
+      success: true,
+      courseId: courseId,
+      moduleId: moduleId,
+      module,
+    });
+  } catch (error) {
+    console.log(`Error in getModuleById: ${error.message}`);
+    return next(new ErrorHandler(error.message, 500));
   }
-
-  // Find specific module
-  const module = eContent.modules.id(moduleId);
-  if (!module) {
-    console.log(`Module not found: ${moduleId}`);
-    return next(new ErrorHandler("Module not found", 404));
-  }
-
-  res.status(200).json({
-    success: true,
-    courseId: courseId,
-    moduleId: moduleId,
-    module,
-  });
 });
 
 // Update module
 exports.updateModule = catchAsyncErrors(async (req, res, next) => {
   console.log("updateModule: Started");
-  const session = await mongoose.startSession();
-  let transactionStarted = false;
+  const transaction = await sequelize.transaction();
+
   try {
-    await session.startTransaction();
-    transactionStarted = true;
-    console.log("Transaction started");
     const { moduleNumber, moduleTitle, link } = req.body;
     const { courseId, moduleId } = req.params;
+
     console.log(`Updating module ${moduleId} for course: ${courseId}`);
-    // Find EContent
-    const eContent = await EContent.findOne({ course: courseId }).session(
-      session
-    );
+
+    // Check course access
+    const teacher = await Teacher.findOne({
+      where: { userId: req.user.id },
+      transaction,
+    });
+
+    if (!teacher) {
+      await transaction.rollback();
+      return next(new ErrorHandler("Teacher not found", 404));
+    }
+
+    const course = await Course.findOne({
+      where: {
+        id: courseId,
+        teacherId: teacher.id,
+      },
+      transaction,
+    });
+
+    if (!course) {
+      await transaction.rollback();
+      return next(new ErrorHandler("Course not found or unauthorized", 404));
+    }
+
+    // Find EContent for this course
+    const eContent = await EContent.findOne({
+      where: { courseId },
+      transaction,
+    });
+
     if (!eContent) {
       console.log(`No EContent found for course: ${courseId}`);
+      await transaction.rollback();
       return next(new ErrorHandler("No EContent found for this course", 404));
     }
+
     // Find specific module
-    const module = eContent.modules.id(moduleId);
+    const module = await EContentModule.findOne({
+      where: {
+        id: moduleId,
+        eContentId: eContent.id,
+      },
+      transaction,
+    });
+
     if (!module) {
       console.log(`Module not found: ${moduleId}`);
+      await transaction.rollback();
       return next(new ErrorHandler("Module not found", 404));
     }
+
     // Update module details
-    if (moduleNumber) {
-      // Removed the duplicate module number check
-      module.moduleNumber = moduleNumber;
-    }
-    if (moduleTitle) module.moduleTitle = moduleTitle;
-    // Update link if provided
-    if (link !== undefined) {
-      module.link = link;
-    }
+    const updateData = {};
+    if (moduleNumber) updateData.moduleNumber = moduleNumber;
+    if (moduleTitle) updateData.moduleTitle = moduleTitle;
+    if (link !== undefined) updateData.link = link;
+
+    await module.update(updateData, { transaction });
+
     // Handle file uploads if any
     if (req.files && req.files.files) {
       try {
@@ -356,17 +471,30 @@ exports.updateModule = catchAsyncErrors(async (req, res, next) => {
           "application/vnd.ms-powerpoint",
           "application/vnd.openxmlformats-officedocument.presentationml.presentation",
         ];
+
         const { filesArray, uploadedFiles } = await handleFileUploads(
           req.files.files,
-          allowedTypes,
-          next
+          allowedTypes
         );
+
         const fileObjects = createFileObjects(filesArray, uploadedFiles);
+
         // Add files to the module
-        module.files.push(...fileObjects);
+        for (const fileObj of fileObjects) {
+          await EContentFile.create(
+            {
+              moduleId: module.id,
+              ...fileObj,
+              uploadDate: new Date(),
+            },
+            { transaction }
+          );
+        }
+
         console.log("New files added to module");
       } catch (uploadError) {
         console.error("Error handling file uploads:", uploadError);
+        await transaction.rollback();
         return next(
           new ErrorHandler(
             uploadError.message || "Failed to upload files",
@@ -375,81 +503,103 @@ exports.updateModule = catchAsyncErrors(async (req, res, next) => {
         );
       }
     }
-    console.log("Saving updated eContent");
-    await eContent.save({ session });
-    console.log("EContent updated");
-    console.log("Committing transaction");
-    await session.commitTransaction();
-    transactionStarted = false;
+
+    await transaction.commit();
     console.log("Transaction committed");
+
+    // Get the updated module with files
+    const updatedModule = await EContentModule.findByPk(module.id, {
+      include: [EContentFile],
+    });
+
     res.status(200).json({
       success: true,
       message: "Module updated successfully",
       courseId: courseId,
       moduleId: moduleId,
-      module: eContent.modules.id(moduleId),
+      module: updatedModule,
     });
   } catch (error) {
     console.log(`Error in updateModule: ${error.message}`);
-    if (transactionStarted) {
-      try {
-        console.log("Aborting transaction");
-        await session.abortTransaction();
-        console.log("Transaction aborted");
-      } catch (abortError) {
-        console.error("Error aborting transaction:", abortError);
-      }
+
+    if (transaction.finished !== "commit") {
+      await transaction.rollback();
     }
+
     return next(new ErrorHandler(error.message, 500));
-  } finally {
-    console.log("Ending session");
-    await session.endSession();
-    console.log("Session ended");
   }
 });
+
 // Delete module
 exports.deleteModule = catchAsyncErrors(async (req, res, next) => {
   console.log("deleteModule: Started");
-  const session = await mongoose.startSession();
-  let transactionStarted = false;
+  const transaction = await sequelize.transaction();
 
   try {
-    await session.startTransaction();
-    transactionStarted = true;
-    console.log("Transaction started");
-
     const { courseId, moduleId } = req.params;
 
     console.log(`Deleting module ${moduleId} for course: ${courseId}`);
 
-    // Find EContent
-    const eContent = await EContent.findOne({ course: courseId }).session(
-      session
-    );
+    // Check course access
+    const teacher = await Teacher.findOne({
+      where: { userId: req.user.id },
+      transaction,
+    });
+
+    if (!teacher) {
+      await transaction.rollback();
+      return next(new ErrorHandler("Teacher not found", 404));
+    }
+
+    const course = await Course.findOne({
+      where: {
+        id: courseId,
+        teacherId: teacher.id,
+      },
+      transaction,
+    });
+
+    if (!course) {
+      await transaction.rollback();
+      return next(new ErrorHandler("Course not found or unauthorized", 404));
+    }
+
+    // Find EContent for this course
+    const eContent = await EContent.findOne({
+      where: { courseId },
+      transaction,
+    });
+
     if (!eContent) {
       console.log(`No EContent found for course: ${courseId}`);
+      await transaction.rollback();
       return next(new ErrorHandler("No EContent found for this course", 404));
     }
 
-    // Find specific module
-    const module = eContent.modules.id(moduleId);
+    // Find specific module with its files
+    const module = await EContentModule.findOne({
+      where: {
+        id: moduleId,
+        eContentId: eContent.id,
+      },
+      include: [EContentFile],
+      transaction,
+    });
+
     if (!module) {
       console.log(`Module not found: ${moduleId}`);
+      await transaction.rollback();
       return next(new ErrorHandler("Module not found", 404));
     }
 
     // Delete all module files from S3 if there are any
-    if (module.files && module.files.length > 0) {
-      console.log(`Deleting ${module.files.length} files from S3`);
+    if (module.EContentFiles && module.EContentFiles.length > 0) {
+      console.log(`Deleting ${module.EContentFiles.length} files from S3`);
 
       try {
-        const deletePromises = module.files.map((file) => {
-          const params = {
-            Bucket: process.env.AWS_S3_BUCKET_NAME,
-            Key: file.fileKey,
-          };
-          return s3.deleteObject(params).promise();
-        });
+        const deletePromises = module.EContentFiles.map((file) =>
+          deleteFileFromS3(file.fileKey)
+        );
 
         await Promise.all(deletePromises);
         console.log("All files deleted from S3");
@@ -459,16 +609,11 @@ exports.deleteModule = catchAsyncErrors(async (req, res, next) => {
       }
     }
 
-    // Remove module
-    eContent.modules.pull({ _id: moduleId });
-
-    console.log("Saving updated eContent");
-    await eContent.save({ session });
+    // Delete the module (will cascade delete files due to foreign key constraints)
+    await module.destroy({ transaction });
     console.log("Module removed");
 
-    console.log("Committing transaction");
-    await session.commitTransaction();
-    transactionStarted = false;
+    await transaction.commit();
     console.log("Transaction committed");
 
     res.status(200).json({
@@ -480,94 +625,107 @@ exports.deleteModule = catchAsyncErrors(async (req, res, next) => {
   } catch (error) {
     console.log(`Error in deleteModule: ${error.message}`);
 
-    if (transactionStarted) {
-      try {
-        console.log("Aborting transaction");
-        await session.abortTransaction();
-        console.log("Transaction aborted");
-      } catch (abortError) {
-        console.error("Error aborting transaction:", abortError);
-      }
+    if (transaction.finished !== "commit") {
+      await transaction.rollback();
     }
 
     return next(new ErrorHandler(error.message, 500));
-  } finally {
-    console.log("Ending session");
-    await session.endSession();
-    console.log("Session ended");
   }
 });
 
 // Delete file from module
 exports.deleteFile = catchAsyncErrors(async (req, res, next) => {
   console.log("deleteFile: Started");
-  const session = await mongoose.startSession();
-  let transactionStarted = false;
+  const transaction = await sequelize.transaction();
 
   try {
-    await session.startTransaction();
-    transactionStarted = true;
-    console.log("Transaction started");
-
     const { courseId, moduleId, fileId } = req.params;
 
     console.log(
       `Deleting file ${fileId} from module ${moduleId} for course: ${courseId}`
     );
 
+    // Check course access
+    const teacher = await Teacher.findOne({
+      where: { userId: req.user.id },
+      transaction,
+    });
+
+    if (!teacher) {
+      await transaction.rollback();
+      return next(new ErrorHandler("Teacher not found", 404));
+    }
+
+    const course = await Course.findOne({
+      where: {
+        id: courseId,
+        teacherId: teacher.id,
+      },
+      transaction,
+    });
+
+    if (!course) {
+      await transaction.rollback();
+      return next(new ErrorHandler("Course not found or unauthorized", 404));
+    }
+
     // Find EContent
-    const eContent = await EContent.findOne({ course: courseId }).session(
-      session
-    );
+    const eContent = await EContent.findOne({
+      where: { courseId },
+      transaction,
+    });
+
     if (!eContent) {
       console.log(`No EContent found for course: ${courseId}`);
+      await transaction.rollback();
       return next(new ErrorHandler("No EContent found for this course", 404));
     }
 
     // Find specific module
-    const module = eContent.modules.id(moduleId);
+    const module = await EContentModule.findOne({
+      where: {
+        id: moduleId,
+        eContentId: eContent.id,
+      },
+      transaction,
+    });
+
     if (!module) {
       console.log(`Module not found: ${moduleId}`);
+      await transaction.rollback();
       return next(new ErrorHandler("Module not found", 404));
     }
 
     // Find the file
-    const fileIndex = module.files.findIndex(
-      (file) => file._id.toString() === fileId
-    );
-    if (fileIndex === -1) {
+    const file = await EContentFile.findOne({
+      where: {
+        id: fileId,
+        moduleId: module.id,
+      },
+      transaction,
+    });
+
+    if (!file) {
       console.log(`File not found: ${fileId}`);
+      await transaction.rollback();
       return next(new ErrorHandler("File not found", 404));
     }
 
-    // Get file key for S3 deletion
-    const fileKey = module.files[fileIndex].fileKey;
-
-    // Delete from S3 if needed
+    // Delete from S3
     try {
-      console.log(`Deleting file from S3: ${fileKey}`);
-      const params = {
-        Bucket: process.env.AWS_S3_BUCKET_NAME,
-        Key: fileKey,
-      };
-
-      await s3.deleteObject(params).promise();
+      console.log(`Deleting file from S3: ${file.fileKey}`);
+      await deleteFileFromS3(file.fileKey);
       console.log("File deleted from S3");
     } catch (s3Error) {
       console.error("Error deleting file from S3:", s3Error);
       // Continue with the database deletion even if S3 deletion fails
     }
 
-    // Remove file from module
-    module.files.splice(fileIndex, 1);
-
-    console.log("Saving updated eContent");
-    await eContent.save({ session });
+    // Delete file from database
+    await file.destroy({ transaction });
     console.log("File removed from module");
 
-    console.log("Committing transaction");
-    await session.commitTransaction();
-    transactionStarted = false;
+    await transaction.commit();
     console.log("Transaction committed");
 
     res.status(200).json({
@@ -580,21 +738,11 @@ exports.deleteFile = catchAsyncErrors(async (req, res, next) => {
   } catch (error) {
     console.log(`Error in deleteFile: ${error.message}`);
 
-    if (transactionStarted) {
-      try {
-        console.log("Aborting transaction");
-        await session.abortTransaction();
-        console.log("Transaction aborted");
-      } catch (abortError) {
-        console.error("Error aborting transaction:", abortError);
-      }
+    if (transaction.finished !== "commit") {
+      await transaction.rollback();
     }
 
     return next(new ErrorHandler(error.message, 500));
-  } finally {
-    console.log("Ending session");
-    await session.endSession();
-    console.log("Session ended");
   }
 });
 

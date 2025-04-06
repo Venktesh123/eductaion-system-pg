@@ -4,7 +4,7 @@ const assignmentController = require("../controllers/assignmentController");
 const auth = require("../middleware/auth");
 const { checkRole } = require("../middleware/roleCheck");
 
-// Create a new assignment (teacher only)
+// Create a new assignment for a course (teacher only)
 router.post(
   "/courses/:courseId/assignments",
   auth,

@@ -1,71 +1,42 @@
-// models/Assignment.js
-const mongoose = require("mongoose");
+const { DataTypes } = require("sequelize");
+const { sequelize } = require("../config/database");
 
-const submissionSchema = new mongoose.Schema({
-  student: {
-    type: mongoose.Schema.Types.ObjectId,
-    ref: "Student",
-    required: true,
-  },
-  submissionDate: {
-    type: Date,
-    default: Date.now,
-  },
-  submissionFile: {
-    type: String, // URL or path to the file
-    required: true,
-  },
-  grade: {
-    type: Number,
-    default: null,
-  },
-  feedback: {
-    type: String,
-    default: "",
-  },
-  status: {
-    type: String,
-    enum: ["submitted", "graded", "returned"],
-    default: "submitted",
-  },
-});
-
-const assignmentSchema = new mongoose.Schema(
+const Assignment = sequelize.define(
+  "Assignment",
   {
+    id: {
+      type: DataTypes.UUID,
+      defaultValue: DataTypes.UUIDV4,
+      primaryKey: true,
+    },
     title: {
-      type: String,
-      required: true,
+      type: DataTypes.STRING,
+      allowNull: false,
     },
     description: {
-      type: String,
-      required: true,
+      type: DataTypes.TEXT,
+      allowNull: false,
     },
-    course: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "Course",
-      required: true,
+    courseId: {
+      type: DataTypes.UUID,
+      allowNull: false,
     },
     dueDate: {
-      type: Date,
-      required: true,
+      type: DataTypes.DATE,
+      allowNull: false,
     },
     totalPoints: {
-      type: Number,
-      required: true,
+      type: DataTypes.INTEGER,
+      allowNull: false,
     },
-    attachments: [
-      {
-        name: String,
-        url: String,
-      },
-    ],
-    submissions: [submissionSchema],
     isActive: {
-      type: Boolean,
-      default: true,
+      type: DataTypes.BOOLEAN,
+      defaultValue: true,
     },
   },
-  { timestamps: true }
+  {
+    timestamps: true,
+  }
 );
 
-module.exports = mongoose.model("Assignment", assignmentSchema);
+module.exports = Assignment;

@@ -1,27 +1,32 @@
 const express = require("express");
 const router = express.Router();
+const eventController = require("../controllers/eventController");
 const auth = require("../middleware/auth");
 const { checkRole } = require("../middleware/roleCheck");
 
-// Import individual controllers
-const eventController = require("../controllers/eventController");
-
-// Routes
+// Create a new event (admin only)
 router.post("/", auth, checkRole(["admin"]), eventController.createEvent);
+
+// Get all events
 router.get(
   "/",
   auth,
-  checkRole(["teacher", "student"]),
+  checkRole(["admin", "teacher", "student"]),
   eventController.getAllEvents
 );
+
+// Get a specific event by ID
 router.get(
   "/:id",
   auth,
-  checkRole(["teacher", "student"]),
+  checkRole(["admin", "teacher", "student"]),
   eventController.getEventById
 );
 
-router.put("/:id", auth, eventController.updateEvent);
-router.delete("/:id", auth, eventController.deleteEvent);
+// Update an event (admin only)
+router.put("/:id", auth, checkRole(["admin"]), eventController.updateEvent);
+
+// Delete an event (admin only)
+router.delete("/:id", auth, checkRole(["admin"]), eventController.deleteEvent);
 
 module.exports = router;

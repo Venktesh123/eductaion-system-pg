@@ -1,23 +1,23 @@
 const express = require("express");
 const router = express.Router();
-const {
-  getUserCourses,
-  getCourseById,
-  createCourse,
-  updateCourse,
-  deleteCourse,
-  getEnrolledCourses,
-} = require("../controllers/courseController");
+const courseController = require("../controllers/courseController");
 const auth = require("../middleware/auth");
 const { checkRole } = require("../middleware/roleCheck");
 
-// Get all courses for teacher
-router.get("/", auth, checkRole(["teacher", "student"]), getUserCourses);
+// Get all courses for the logged-in user (teacher or student)
+router.get(
+  "/",
+  auth,
+  checkRole(["teacher", "student"]),
+  courseController.getUserCourses
+);
+
+// Get all courses the student is enrolled in
 router.get(
   "/student",
   auth,
-  checkRole(["teacher", "student"]),
-  getEnrolledCourses
+  checkRole(["student"]),
+  courseController.getEnrolledCourses
 );
 
 // Get specific course by ID
@@ -25,16 +25,26 @@ router.get(
   "/:courseId",
   auth,
   checkRole(["teacher", "student"]),
-  getCourseById
+  courseController.getCourseById
 );
 
-// Create new course
-router.post("/", auth, checkRole(["teacher"]), createCourse);
+// Create new course (teacher only)
+router.post("/", auth, checkRole(["teacher"]), courseController.createCourse);
 
-// Update course
-router.put("/:courseId", auth, checkRole(["teacher"]), updateCourse);
+// Update course (teacher only)
+router.put(
+  "/:courseId",
+  auth,
+  checkRole(["teacher"]),
+  courseController.updateCourse
+);
 
-// Delete course
-router.delete("/:courseId", auth, checkRole(["teacher"]), deleteCourse);
+// Delete course (teacher only)
+router.delete(
+  "/:courseId",
+  auth,
+  checkRole(["teacher"]),
+  courseController.deleteCourse
+);
 
 module.exports = router;

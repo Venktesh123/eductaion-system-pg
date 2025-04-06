@@ -1,27 +1,37 @@
-const mongoose = require("mongoose");
-const studentSchema = new mongoose.Schema(
+const { DataTypes } = require("sequelize");
+const { sequelize } = require("../config/database");
+
+const Student = sequelize.define(
+  "Student",
   {
-    user: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "User",
-      required: true,
+    id: {
+      type: DataTypes.UUID,
+      defaultValue: DataTypes.UUIDV4,
+      primaryKey: true,
     },
-    teacher: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "Teacher",
-      required: true,
+    userId: {
+      type: DataTypes.UUID,
+      allowNull: false,
+      unique: true,
     },
-    courses: [
-      {
-        type: mongoose.Schema.Types.ObjectId,
-        ref: "Course",
-      },
-    ],
-    // Add teacherEmail for direct lookups
+    teacherId: {
+      type: DataTypes.UUID,
+      allowNull: false,
+    },
     teacherEmail: {
-      type: String,
-      required: true,
-      lowercase: true,
+      type: DataTypes.STRING,
+      allowNull: false,
+      validate: {
+        isEmail: true,
+      },
+    },
+    program: {
+      type: DataTypes.STRING,
+      allowNull: true,
+    },
+    semester: {
+      type: DataTypes.STRING,
+      allowNull: true,
     },
   },
   {
@@ -29,19 +39,4 @@ const studentSchema = new mongoose.Schema(
   }
 );
 
-// Pre-save middleware to ensure teacherEmail matches teacher's email
-studentSchema.pre("save", async function (next) {
-  if (this.isNew || this.isModified("teacher")) {
-    const teacher = await this.model("Teacher").findById(this.teacher);
-    if (teacher) {
-      this.teacherEmail = teacher.email;
-    }
-  }
-  next();
-});
-
-// Index for efficient lookups
-studentSchema.index({ teacherEmail: 1 });
-studentSchema.index({ teacher: 1 });
-
-module.exports = mongoose.model("Student", studentSchema);
+module.exports = Student;
