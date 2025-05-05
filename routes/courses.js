@@ -47,4 +47,45 @@ router.delete(
   courseController.deleteCourse
 );
 
+// Update course attendance (teacher only)
+router.put(
+  "/:courseId/attendance",
+  auth,
+  checkRole(["teacher"]),
+  courseController.updateCourseAttendance
+);
+
+// Lecture routes
+// Get all lectures for a course
+router.get(
+  "/:courseId/lectures",
+  auth,
+  checkRole(["teacher", "student"]),
+  courseController.getCourseLectures
+);
+
+// Add a new lecture to a course
+router.post(
+  "/:courseId/lectures",
+  auth,
+  checkRole(["teacher"]),
+  courseController.addLecture
+);
+
+// Update a lecture
+router.put(
+  "/:courseId/lectures/:lectureId",
+  auth,
+  checkRole(["teacher"]),
+  courseController.updateCourseLecture
+);
+
+// Delete a lecture
+router.delete(
+  "/:courseId/lectures/:lectureId",
+  auth,
+  checkRole(["teacher"]),
+  courseController.deleteCourseLecture
+);
+
 module.exports = router;
