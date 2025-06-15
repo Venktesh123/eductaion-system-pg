@@ -10,7 +10,7 @@
     "seed": "node seeds/run.js"
   },
   "dependencies": {
-    "aws-sdk": "^2.1692.0",
+    "@azure/storage-blob": "^12.17.0",
     "bcryptjs": "^2.4.3",
     "body-parser": "^1.20.3",
     "cors": "^2.8.5",

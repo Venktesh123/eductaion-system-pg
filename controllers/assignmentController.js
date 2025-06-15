@@ -10,7 +10,7 @@ const {
 } = require("../models");
 const { ErrorHandler } = require("../middleware/errorHandler");
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
-const { uploadFileToS3 } = require("../utils/s3Utils");
+const { uploadFileToAzure } = require("../utils/azureUtils");
 
 // Create new assignment
 exports.createAssignment = catchAsyncErrors(async (req, res, next) => {
@@ -118,12 +118,12 @@ exports.createAssignment = catchAsyncErrors(async (req, res, next) => {
         }
       }
 
-      // Upload attachments to S3
+      // Upload attachments to Azure
       try {
-        console.log("Starting file uploads to S3");
+        console.log("Starting file uploads to Azure");
 
         const uploadPromises = attachmentsArray.map((file) =>
-          uploadFileToS3(file, "assignment-attachments")
+          uploadFileToAzure(file, "assignment-attachments")
         );
 
         const uploadedFiles = await Promise.all(uploadPromises);
@@ -275,13 +275,13 @@ exports.submitAssignment = catchAsyncErrors(async (req, res, next) => {
     console.log("Is submission late:", isDueDatePassed);
 
     try {
-      // Upload submission to S3
-      console.log("Attempting S3 upload");
-      const uploadedFile = await uploadFileToS3(
+      // Upload submission to Azure
+      console.log("Attempting Azure upload");
+      const uploadedFile = await uploadFileToAzure(
         submissionFile,
         `assignment-submissions/${assignment.id}`
       );
-      console.log("S3 upload successful:", uploadedFile.url);
+      console.log("Azure upload successful:", uploadedFile.url);
 
       // Check if already submitted
       const existingSubmission = await Submission.findOne({
@@ -742,12 +742,12 @@ exports.updateAssignment = catchAsyncErrors(async (req, res, next) => {
         }
       }
 
-      // Upload new attachments to S3
+      // Upload new attachments to Azure
       try {
-        console.log("Starting file uploads to S3");
+        console.log("Starting file uploads to Azure");
 
         const uploadPromises = attachmentsArray.map((file) =>
-          uploadFileToS3(file, "assignment-attachments")
+          uploadFileToAzure(file, "assignment-attachments")
         );
 
         const uploadedFiles = await Promise.all(uploadPromises);
