@@ -1,5 +1,6 @@
-const { Sequelize } = require('sequelize');
-require('dotenv').config();
+const { Sequelize } = require("sequelize");
+const pg = require("pg"); // Add this import
+require("dotenv").config();
 
 const sequelize = new Sequelize(
   process.env.POSTGRES_DB,
@@ -8,29 +9,33 @@ const sequelize = new Sequelize(
   {
     host: process.env.POSTGRES_HOST,
     port: process.env.POSTGRES_PORT || 5432,
-    dialect: 'postgres',
-    logging: process.env.NODE_ENV === 'development' ? console.log : false,
+    dialect: "postgres",
+    dialectModule: pg, // Add this line - explicitly specify the pg module
+    logging: process.env.NODE_ENV === "development" ? console.log : false,
     dialectOptions: {
-      ssl: process.env.POSTGRES_SSL === 'true' ? {
-        require: true,
-        rejectUnauthorized: false
-      } : false
+      ssl:
+        process.env.POSTGRES_SSL === "true"
+          ? {
+              require: true,
+              rejectUnauthorized: false,
+            }
+          : false,
     },
     pool: {
       max: 5,
       min: 0,
       acquire: 30000,
-      idle: 10000
-    }
+      idle: 10000,
+    },
   }
 );
 
 const connectDB = async () => {
   try {
     await sequelize.authenticate();
-    console.log('PostgreSQL connected successfully');
+    console.log("PostgreSQL connected successfully");
   } catch (error) {
-    console.error('PostgreSQL connection error:', error);
+    console.error("PostgreSQL connection error:", error);
     process.exit(1);
   }
 };
