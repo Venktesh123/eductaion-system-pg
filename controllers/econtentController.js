@@ -9,7 +9,7 @@ const {
 } = require("../models");
 const { ErrorHandler } = require("../middleware/errorHandler");
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
-const { uploadFileToS3, deleteFileFromS3 } = require("../utils/s3Utils");
+const { uploadFileToS3, deleteFileFromS3 } = require("../utils/azureUtils");
 
 // Helper function to handle file uploads
 const handleFileUploads = async (files, allowedTypes, next) => {

@@ -8,7 +8,10 @@ const {
 } = require("../models");
 const { ErrorHandler } = require("../middleware/errorHandler");
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
-const { uploadFileToS3, deleteFileFromS3 } = require("../utils/s3Utils");
+const {
+  uploadFileToAzure,
+  deleteFileFromAzure,
+} = require("../utils/azureUtils");
 
 // Create a new lecture
 const createLecture = catchAsyncErrors(async (req, res, next) => {
@@ -79,9 +82,9 @@ const createLecture = catchAsyncErrors(async (req, res, next) => {
       }
 
       try {
-        // Upload to S3
+        // Upload to Azure
         const uploadPath = `courses/${course.id}/lectures`;
-        const uploadResult = await uploadFileToS3(videoFile, uploadPath);
+        const uploadResult = await uploadFileToAzure(videoFile, uploadPath);
 
         lectureData.videoUrl = uploadResult.url;
         lectureData.videoKey = uploadResult.key;
@@ -183,14 +186,14 @@ const updateLecture = catchAsyncErrors(async (req, res, next) => {
       }
 
       try {
-        // Delete old video from S3 if it exists
+        // Delete old video from Azure if it exists
         if (lecture.videoKey) {
-          await deleteFileFromS3(lecture.videoKey);
+          await deleteFileFromAzure(lecture.videoKey);
         }
 
-        // Upload new video to S3
+        // Upload new video to Azure
         const uploadPath = `courses/${course.id}/lectures`;
-        const uploadResult = await uploadFileToS3(videoFile, uploadPath);
+        const uploadResult = await uploadFileToAzure(videoFile, uploadPath);
 
         updateData.videoUrl = uploadResult.url;
         updateData.videoKey = uploadResult.key;
@@ -493,14 +496,14 @@ const deleteLecture = catchAsyncErrors(async (req, res, next) => {
       );
     }
 
-    // Delete video from S3 if it exists
+    // Delete video from Azure if it exists
     if (lecture.videoKey) {
       try {
-        await deleteFileFromS3(lecture.videoKey);
-        console.log(`Deleted video from S3: ${lecture.videoKey}`);
+        await deleteFileFromAzure(lecture.videoKey);
+        console.log(`Deleted video from Azure: ${lecture.videoKey}`);
       } catch (deleteError) {
         console.error("Error deleting video file:", deleteError);
-        // Continue with lecture deletion even if S3 delete fails
+        // Continue with lecture deletion even if Azure delete fails
       }
     }
 

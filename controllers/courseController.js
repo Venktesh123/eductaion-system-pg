@@ -17,83 +17,15 @@ const {
 const { ErrorHandler } = require("../middleware/errorHandler");
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
 const { Op } = require("sequelize");
-const AWS = require("aws-sdk");
+const {
+  uploadFileToAzure,
+  deleteFileFromAzure,
+} = require("../utils/azureUtils");
 
 // Better logging setup - replace with your preferred logging library
 const logger = {
   info: (message) => console.log(`[INFO] ${message}`),
   error: (message, error) => console.error(`[ERROR] ${message}`, error),
-};
-
-// Configure AWS SDK
-const s3 = new AWS.S3({
-  accessKeyId: process.env.AWS_ACCESS_KEY_ID,
-  secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
-  region: process.env.AWS_REGION,
-});
-
-// Upload file to S3
-const uploadFileToS3 = async (file, path) => {
-  console.log("Uploading file to S3");
-  return new Promise((resolve, reject) => {
-    // Make sure we have the file data in the right format for S3
-    const fileContent = file.data;
-    if (!fileContent) {
-      console.log("No file content found");
-      return reject(new Error("No file content found"));
-    }
-
-    // Generate a unique filename
-    const fileName = `${path}/${Date.now()}-${file.name.replace(/\s+/g, "-")}`;
-
-    // Set up the S3 upload parameters
-    const params = {
-      Bucket: process.env.AWS_S3_BUCKET_NAME,
-      Key: fileName,
-      Body: fileContent,
-      ContentType: file.mimetype,
-    };
-
-    console.log("S3 upload params prepared");
-
-    // Upload to S3
-    s3.upload(params, (err, data) => {
-      if (err) {
-        console.log("S3 upload error:", err);
-        return reject(err);
-      }
-      console.log("File uploaded successfully:", fileName);
-      resolve({
-        url: data.Location,
-        key: data.Key,
-      });
-    });
-  });
-};
-
-// Delete file from S3
-const deleteFileFromS3 = async (key) => {
-  console.log("Deleting file from S3:", key);
-  return new Promise((resolve, reject) => {
-    if (!key) {
-      console.log("No file key provided");
-      return resolve({ message: "No file key provided" });
-    }
-
-    const params = {
-      Bucket: process.env.AWS_S3_BUCKET_NAME,
-      Key: key,
-    };
-
-    s3.deleteObject(params, (err, data) => {
-      if (err) {
-        console.log("S3 delete error:", err);
-        return reject(err);
-      }
-      console.log("File deleted successfully from S3");
-      resolve(data);
-    });
-  });
 };
 
 // Helper function to format course data for consistent API responses
@@ -983,21 +915,21 @@ const deleteCourse = catchAsyncErrors(async (req, res, next) => {
       return next(new ErrorHandler("Course not found or unauthorized", 404));
     }
 
-    // Before deleting course, get lectures to delete videos from S3
+    // Before deleting course, get lectures to delete videos from Azure
     const lectures = await Lecture.findAll({
       where: { course_id: course.id },
       transaction,
     });
 
-    // Delete videos from S3 for each lecture
+    // Delete videos from Azure for each lecture
     for (const lecture of lectures) {
       if (lecture.video_key) {
         try {
-          await deleteFileFromS3(lecture.video_key);
-          logger.info(`Deleted video from S3: ${lecture.video_key}`);
+          await deleteFileFromAzure(lecture.video_key);
+          logger.info(`Deleted video from Azure: ${lecture.video_key}`);
         } catch (deleteError) {
           logger.error("Error deleting video file:", deleteError);
-          // Continue with deletion even if S3 delete fails
+          // Continue with deletion even if Azure delete fails
         }
       }
     }
@@ -1087,9 +1019,9 @@ const addLecture = catchAsyncErrors(async (req, res, next) => {
         return next(new ErrorHandler("Uploaded file must be a video", 400));
       }
 
-      // Upload to S3
+      // Upload to Azure
       const uploadPath = `courses/${course.id}/lectures`;
-      const uploadResult = await uploadFileToS3(videoFile, uploadPath);
+      const uploadResult = await uploadFileToAzure(videoFile, uploadPath);
 
       videoUrl = uploadResult.url;
       videoKey = uploadResult.key;
@@ -1207,19 +1139,19 @@ const updateCourseLecture = catchAsyncErrors(async (req, res, next) => {
         return next(new ErrorHandler("Uploaded file must be a video", 400));
       }
 
-      // Delete old video from S3 if it exists
+      // Delete old video from Azure if it exists
       if (lecture.video_key) {
         try {
-          await deleteFileFromS3(lecture.video_key);
+          await deleteFileFromAzure(lecture.video_key);
         } catch (deleteError) {
           logger.error("Error deleting old video file:", deleteError);
           // Continue with upload even if delete fails
         }
       }
 
-      // Upload new video to S3
+      // Upload new video to Azure
       const uploadPath = `courses/${course.id}/lectures`;
-      const uploadResult = await uploadFileToS3(videoFile, uploadPath);
+      const uploadResult = await uploadFileToAzure(videoFile, uploadPath);
 
       updateData.video_url = uploadResult.url;
       updateData.video_key = uploadResult.key;
@@ -1307,14 +1239,14 @@ const deleteCourseLecture = catchAsyncErrors(async (req, res, next) => {
       return next(new ErrorHandler("Lecture not found", 404));
     }
 
-    // Delete video from S3 if it exists
+    // Delete video from Azure if it exists
     if (lecture.video_key) {
       try {
-        await deleteFileFromS3(lecture.video_key);
-        logger.info(`Deleted video from S3: ${lecture.video_key}`);
+        await deleteFileFromAzure(lecture.video_key);
+        logger.info(`Deleted video from Azure: ${lecture.video_key}`);
       } catch (deleteError) {
         logger.error("Error deleting video file:", deleteError);
-        // Continue with lecture deletion even if S3 delete fails
+        // Continue with lecture deletion even if Azure delete fails
       }
     }
 
