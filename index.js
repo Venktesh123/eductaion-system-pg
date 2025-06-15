@@ -3,7 +3,6 @@ const cors = require("cors");
 const { connectDB, sequelize } = require("./config/database");
 const bodyParser = require("body-parser");
 require("dotenv").config();
-//raj
 const path = require("path");
 const fileUpload = require("express-fileupload");
 const { errorMiddleware } = require("./middleware/errorHandler");
