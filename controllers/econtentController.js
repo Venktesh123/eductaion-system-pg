@@ -9,7 +9,10 @@ const {
 } = require("../models");
 const { ErrorHandler } = require("../middleware/errorHandler");
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
-const { uploadFileToS3, deleteFileFromS3 } = require("../utils/azureUtils");
+const {
+  uploadFileToAzure,
+  deleteFileFromAzure,
+} = require("../utils/azureUtils");
 
 // Helper function to handle file uploads
 const handleFileUploads = async (files, allowedTypes, next) => {
@@ -42,10 +45,10 @@ const handleFileUploads = async (files, allowedTypes, next) => {
     }
   }
 
-  // Upload files to S3
-  console.log("Starting file uploads to S3");
+  // Upload files to Azure
+  console.log("Starting file uploads to Azure Blob Storage");
   const uploadPromises = filesArray.map((file) =>
-    uploadFileToS3(file, "econtent-files")
+    uploadFileToAzure(file, "econtent-files")
   );
 
   const uploadedFiles = await Promise.all(uploadPromises);
@@ -592,20 +595,25 @@ exports.deleteModule = catchAsyncErrors(async (req, res, next) => {
       return next(new ErrorHandler("Module not found", 404));
     }
 
-    // Delete all module files from S3 if there are any
+    // Delete all module files from Azure Blob Storage if there are any
     if (module.EContentFiles && module.EContentFiles.length > 0) {
-      console.log(`Deleting ${module.EContentFiles.length} files from S3`);
+      console.log(
+        `Deleting ${module.EContentFiles.length} files from Azure Blob Storage`
+      );
 
       try {
         const deletePromises = module.EContentFiles.map((file) =>
-          deleteFileFromS3(file.fileKey)
+          deleteFileFromAzure(file.fileKey)
         );
 
         await Promise.all(deletePromises);
-        console.log("All files deleted from S3");
-      } catch (s3Error) {
-        console.error("Error deleting files from S3:", s3Error);
-        // Continue with the database deletion even if S3 deletion fails
+        console.log("All files deleted from Azure Blob Storage");
+      } catch (azureError) {
+        console.error(
+          "Error deleting files from Azure Blob Storage:",
+          azureError
+        );
+        // Continue with the database deletion even if Azure deletion fails
       }
     }
 
@@ -711,14 +719,14 @@ exports.deleteFile = catchAsyncErrors(async (req, res, next) => {
       return next(new ErrorHandler("File not found", 404));
     }
 
-    // Delete from S3
+    // Delete from Azure Blob Storage
     try {
-      console.log(`Deleting file from S3: ${file.fileKey}`);
-      await deleteFileFromS3(file.fileKey);
-      console.log("File deleted from S3");
-    } catch (s3Error) {
-      console.error("Error deleting file from S3:", s3Error);
-      // Continue with the database deletion even if S3 deletion fails
+      console.log(`Deleting file from Azure Blob Storage: ${file.fileKey}`);
+      await deleteFileFromAzure(file.fileKey);
+      console.log("File deleted from Azure Blob Storage");
+    } catch (azureError) {
+      console.error("Error deleting file from Azure Blob Storage:", azureError);
+      // Continue with the database deletion even if Azure deletion fails
     }
 
     // Delete file from database
