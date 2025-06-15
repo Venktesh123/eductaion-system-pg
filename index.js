@@ -1,4 +1,5 @@
 const express = require("express");
+const pg = require("pg");
 const cors = require("cors");
 const { connectDB, sequelize } = require("./config/database");
 const bodyParser = require("body-parser");

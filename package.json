@@ -7,7 +7,8 @@
     "start": "node index.js",
     "dev": "nodemon index.js",
     "migrate": "node migrations/run.js",
-    "seed": "node seeds/run.js"
+    "seed": "node seeds/run.js",
+    "vercel-build": "npm install --force"
   },
   "dependencies": {
     "aws-sdk": "^2.1692.0",
